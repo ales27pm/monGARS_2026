@@ -7,6 +7,7 @@ struct DiagnosticsView: View {
     @Query(sort: \AgentRunRecord.updatedAt, order: .reverse) private var runs: [AgentRunRecord]
     @Query(sort: \AgentTraceRecord.createdAt, order: .reverse) private var traces: [AgentTraceRecord]
     @Query(sort: \ToolCallRecord.createdAt, order: .reverse) private var persistedToolCalls: [ToolCallRecord]
+    @State private var visualizationMode: DiagnosticsVisualizationMode = .timeline
 
     var body: some View {
         List {
@@ -19,6 +20,22 @@ struct DiagnosticsView: View {
                 if let lastError = container.diagnostics.lastError {
                     Text(lastError)
                         .foregroundStyle(.red)
+                }
+            }
+
+            Section("Execution Visualization") {
+                Picker("View", selection: $visualizationMode) {
+                    ForEach(DiagnosticsVisualizationMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                switch visualizationMode {
+                case .timeline:
+                    timelineView
+                case .graph:
+                    graphView
                 }
             }
 
@@ -83,5 +100,99 @@ struct DiagnosticsView: View {
             }
         }
         .navigationTitle("Diagnostics")
+    }
+
+    private var timelineView: some View {
+        let rows = DiagnosticsVisualizationBuilder.timelineRows(runs: Array(runs.prefix(8)), traces: traces)
+        return VStack(alignment: .leading, spacing: 10) {
+            if rows.isEmpty {
+                Text("No agent runs recorded yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(rows.prefix(32)) { row in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(row.stepIndex). \(row.phase)")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text(row.goal)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Text(row.message)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    private var graphView: some View {
+        let latestRun = runs.sorted { $0.updatedAt > $1.updatedAt }.first
+        let nodes = DiagnosticsVisualizationBuilder.graphNodes(for: latestRun, traces: traces)
+        return VStack(alignment: .leading, spacing: 10) {
+            if let latestRun {
+                Text(latestRun.goal)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text("No agent runs recorded yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(nodes) { node in
+                        graphNode(node)
+                        if node.phase != nodes.last?.phase {
+                            Image(systemName: "chevron.right")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            ForEach(DiagnosticsVisualizationBuilder.phaseEdges.prefix(6)) { edge in
+                Text("\(edge.from.statusText) -> \(edge.to.statusText)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func graphNode(_ node: DiagnosticsGraphNode) -> some View {
+        VStack(spacing: 4) {
+            Circle()
+                .fill(color(for: node.state))
+                .frame(width: 12, height: 12)
+            Text(node.phase.statusText)
+                .font(.caption2)
+                .lineLimit(1)
+        }
+        .padding(8)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func color(for state: DiagnosticsGraphNodeState) -> Color {
+        switch state {
+        case .pending:
+            return .gray
+        case .completed:
+            return .green
+        case .current:
+            return .blue
+        case .waiting:
+            return .orange
+        case .failed:
+            return .red
+        }
     }
 }

@@ -45,6 +45,7 @@ final class AppContainer {
         ChatMessage.self,
         MemoryRecord.self,
         DocumentRecord.self,
+        DocumentChunkRecord.self,
         AgentCheckpointRecord.self,
         AgentRunRecord.self,
         AgentTraceRecord.self,
@@ -73,7 +74,9 @@ final class AppContainer {
         conversation.messages.append(ChatMessage(role: .assistant, content: "Hi, I am monGARS. Ask me for the time, a calculation, a saved memory, or a document summary."))
         context.insert(conversation)
         context.insert(MemoryRecord(content: "monGARS keeps chat, memories, and documents local by default.", tags: ["privacy", "local"]))
-        context.insert(DocumentRecord(title: "Sample Notes.md", content: "monGARS is a local-first SwiftUI assistant with tool routing, memory search, and document retrieval."))
+        let sampleDocument = DocumentRecord(title: "Sample Notes.md", content: "monGARS is a local-first SwiftUI assistant with tool routing, memory search, and document retrieval.")
+        context.insert(sampleDocument)
+        try? documentService.rebuildChunks(for: sampleDocument, context: context)
         context.insert(AgentTaskRecord(title: "Try the autonomous document summary flow", notes: "Import a Markdown file, then ask monGARS to summarize it and remember key points."))
         try? context.save()
     }

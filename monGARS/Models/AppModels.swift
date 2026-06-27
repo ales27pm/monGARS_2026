@@ -98,6 +98,44 @@ final class DocumentRecord {
 }
 
 @Model
+final class DocumentChunkRecord {
+    var id: UUID
+    var documentID: UUID
+    var title: String
+    var text: String
+    var chunkIndex: Int
+    var tokenEstimate: Int
+    var lexicalTerms: [String]
+    var embeddingData: Data?
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        documentID: UUID,
+        title: String,
+        text: String,
+        chunkIndex: Int,
+        tokenEstimate: Int,
+        lexicalTerms: [String],
+        embeddingData: Data? = nil,
+        createdAt: Date = .now,
+        updatedAt: Date = .now
+    ) {
+        self.id = id
+        self.documentID = documentID
+        self.title = title
+        self.text = text
+        self.chunkIndex = chunkIndex
+        self.tokenEstimate = tokenEstimate
+        self.lexicalTerms = lexicalTerms
+        self.embeddingData = embeddingData
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+@Model
 final class AgentCheckpointRecord {
     var id: UUID
     var runID: UUID

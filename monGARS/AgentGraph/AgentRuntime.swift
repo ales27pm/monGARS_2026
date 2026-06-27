@@ -58,13 +58,18 @@ struct AgentReflector: Sendable {
     }
 }
 
-enum ApprovalDecision: Sendable {
+enum ApprovalDecision: Sendable, Equatable {
     case approved
     case rejected
 }
 
 actor AgentApprovalGate {
-    private var continuations: [UUID: CheckedContinuation<ApprovalDecision, Never>] = [:]
+    private struct ApprovalWaiter {
+        var runID: UUID
+        var continuation: CheckedContinuation<ApprovalDecision, Never>
+    }
+
+    private var continuations: [UUID: ApprovalWaiter] = [:]
     private var resolvedDecisions: [UUID: ApprovalDecision] = [:]
 
     func suspend(runID: UUID, approvalID: UUID) async -> ApprovalDecision {
@@ -73,16 +78,30 @@ actor AgentApprovalGate {
         }
 
         return await withCheckedContinuation { continuation in
-            continuations[approvalID] = continuation
+            if let decision = resolvedDecisions.removeValue(forKey: approvalID) {
+                continuation.resume(returning: decision)
+            } else {
+                continuations[approvalID] = ApprovalWaiter(runID: runID, continuation: continuation)
+            }
         }
     }
 
     func resolve(approvalID: UUID, approved: Bool) {
         let decision: ApprovalDecision = approved ? .approved : .rejected
-        if let continuation = continuations.removeValue(forKey: approvalID) {
-            continuation.resume(returning: decision)
+        if let waiter = continuations.removeValue(forKey: approvalID) {
+            waiter.continuation.resume(returning: decision)
         } else {
             resolvedDecisions[approvalID] = decision
+        }
+    }
+
+    func cancel(runID: UUID) {
+        let approvalIDs = continuations.compactMap { approvalID, waiter in
+            waiter.runID == runID ? approvalID : nil
+        }
+
+        for approvalID in approvalIDs {
+            continuations.removeValue(forKey: approvalID)?.continuation.resume(returning: .rejected)
         }
     }
 }
@@ -105,32 +124,120 @@ private struct AgentCheckpointSnapshot: Sendable {
     var createdAt: Date
 }
 
+private struct ToolCallSnapshot: Sendable {
+    var runID: UUID
+    var toolName: String
+    var input: String
+    var output: String
+    var riskLevel: String
+    var requiresApproval: Bool
+    var approved: Bool
+    var createdAt: Date
+}
+
 final class AgentTelemetryBuffer: @unchecked Sendable {
     private let lock = NSLock()
+    private let inMemoryContainer: ModelContainer?
+    private let inMemoryContext: ModelContext?
     private var traces: [AgentTraceSnapshot] = []
     private var checkpoints: [AgentCheckpointSnapshot] = []
+    private var toolCalls: [ToolCallSnapshot] = []
+
+    init() {
+        let schema = Schema([
+            AgentTraceRecord.self,
+            AgentCheckpointRecord.self,
+            ToolCallRecord.self
+        ])
+        do {
+            let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+            inMemoryContainer = container
+            inMemoryContext = ModelContext(container)
+        } catch {
+            inMemoryContainer = nil
+            inMemoryContext = nil
+        }
+    }
 
     func appendTrace(runID: UUID, stepIndex: Int, phase: String, message: String, toolName: String? = nil, latencyMs: Double = 0) {
         let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: message, toolName: toolName, latencyMs: latencyMs, createdAt: .now)
         lock.withLock {
-            traces.append(snapshot)
+            if let inMemoryContext {
+                inMemoryContext.insert(AgentTraceRecord(
+                    runID: snapshot.runID,
+                    stepIndex: snapshot.stepIndex,
+                    phase: snapshot.phase,
+                    message: snapshot.message,
+                    toolName: snapshot.toolName,
+                    latencyMs: snapshot.latencyMs,
+                    createdAt: snapshot.createdAt
+                ))
+            } else {
+                traces.append(snapshot)
+            }
         }
     }
 
     func appendCheckpoint(runID: UUID, nodeID: String, stateSummary: String, stateData: Data? = nil) {
         let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: stateSummary, stateData: stateData, createdAt: .now)
         lock.withLock {
-            checkpoints.append(snapshot)
+            if let inMemoryContext {
+                inMemoryContext.insert(AgentCheckpointRecord(
+                    runID: snapshot.runID,
+                    nodeID: snapshot.nodeID,
+                    stateSummary: snapshot.stateSummary,
+                    stateData: snapshot.stateData,
+                    createdAt: snapshot.createdAt
+                ))
+            } else {
+                checkpoints.append(snapshot)
+            }
+        }
+    }
+
+    func appendToolCall(runID: UUID, input: String, result: ToolResult) {
+        let snapshot = ToolCallSnapshot(
+            runID: runID,
+            toolName: result.toolName,
+            input: input,
+            output: result.output,
+            riskLevel: result.riskLevel.rawValue,
+            requiresApproval: result.requiresApproval,
+            approved: result.approved,
+            createdAt: .now
+        )
+        lock.withLock {
+            if let inMemoryContext {
+                inMemoryContext.insert(ToolCallRecord(
+                    runID: snapshot.runID,
+                    toolName: snapshot.toolName,
+                    input: snapshot.input,
+                    output: snapshot.output,
+                    riskLevel: snapshot.riskLevel,
+                    requiresApproval: snapshot.requiresApproval,
+                    approved: snapshot.approved,
+                    createdAt: snapshot.createdAt
+                ))
+            } else {
+                toolCalls.append(snapshot)
+            }
         }
     }
 
     func flush(runID: UUID, to context: ModelContext) throws {
+        if let inMemoryContext {
+            try flushFromInMemoryContext(runID: runID, from: inMemoryContext, to: context)
+            return
+        }
+
         let payload = lock.withLock {
             let matchingTraces = traces.filter { $0.runID == runID }
             let matchingCheckpoints = checkpoints.filter { $0.runID == runID }
+            let matchingToolCalls = toolCalls.filter { $0.runID == runID }
             traces.removeAll { $0.runID == runID }
             checkpoints.removeAll { $0.runID == runID }
-            return (matchingTraces, matchingCheckpoints)
+            toolCalls.removeAll { $0.runID == runID }
+            return (matchingTraces, matchingCheckpoints, matchingToolCalls)
         }
 
         for trace in payload.0 {
@@ -155,7 +262,69 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             ))
         }
 
+        for toolCall in payload.2 {
+            context.insert(ToolCallRecord(
+                runID: toolCall.runID,
+                toolName: toolCall.toolName,
+                input: toolCall.input,
+                output: toolCall.output,
+                riskLevel: toolCall.riskLevel,
+                requiresApproval: toolCall.requiresApproval,
+                approved: toolCall.approved,
+                createdAt: toolCall.createdAt
+            ))
+        }
+
         try context.safeSave()
+    }
+
+    private func flushFromInMemoryContext(runID: UUID, from sourceContext: ModelContext, to destinationContext: ModelContext) throws {
+        try lock.withLock {
+            let traceRecords = try sourceContext.fetch(FetchDescriptor<AgentTraceRecord>()).filter { $0.runID == runID }
+            let checkpointRecords = try sourceContext.fetch(FetchDescriptor<AgentCheckpointRecord>()).filter { $0.runID == runID }
+            let toolCallRecords = try sourceContext.fetch(FetchDescriptor<ToolCallRecord>()).filter { $0.runID == runID }
+
+            for trace in traceRecords {
+                destinationContext.insert(AgentTraceRecord(
+                    runID: trace.runID,
+                    stepIndex: trace.stepIndex,
+                    phase: trace.phase,
+                    message: trace.message,
+                    toolName: trace.toolName,
+                    latencyMs: trace.latencyMs,
+                    createdAt: trace.createdAt
+                ))
+                sourceContext.delete(trace)
+            }
+
+            for checkpoint in checkpointRecords {
+                destinationContext.insert(AgentCheckpointRecord(
+                    runID: checkpoint.runID,
+                    nodeID: checkpoint.nodeID,
+                    stateSummary: checkpoint.stateSummary,
+                    stateData: checkpoint.stateData,
+                    createdAt: checkpoint.createdAt
+                ))
+                sourceContext.delete(checkpoint)
+            }
+
+            for toolCall in toolCallRecords {
+                destinationContext.insert(ToolCallRecord(
+                    runID: toolCall.runID,
+                    toolName: toolCall.toolName,
+                    input: toolCall.input,
+                    output: toolCall.output,
+                    riskLevel: toolCall.riskLevel,
+                    requiresApproval: toolCall.requiresApproval,
+                    approved: toolCall.approved,
+                    createdAt: toolCall.createdAt
+                ))
+                sourceContext.delete(toolCall)
+            }
+
+            try sourceContext.safeSave()
+            try destinationContext.safeSave()
+        }
     }
 }
 
@@ -309,7 +478,7 @@ struct AgentLoop: Sendable {
             let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, context: context)
             if let result {
                 state.toolResults.append(result.output)
-                context.insert(ToolCallRecord(runID: state.runID, toolName: result.toolName, input: goal, output: result.output, riskLevel: result.riskLevel.rawValue, requiresApproval: result.requiresApproval, approved: result.approved))
+                telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
             }
             try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
                 result?.output ?? "Tool produced no output."
@@ -592,6 +761,7 @@ final class AgentRuntime {
         runningTasks[run.id] = nil
         run.statusRawValue = AgentRunStatus.cancelled.rawValue
         run.updatedAt = .now
+        Task { await approvalGate.cancel(runID: run.id) }
         let pendingApprovals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { $0.runID == run.id && $0.approved == nil }
         for approval in pendingApprovals {
             approval.approved = false

@@ -5,6 +5,7 @@ struct ChatView: View {
     @Bindable var container: AppContainer
     let navigateToSection: ((AppSection) -> Void)?
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openURL) private var openURL
     @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
     @Query(sort: \AgentTraceRecord.createdAt, order: .forward) private var traces: [AgentTraceRecord]
     @Query(sort: \AgentRunRecord.updatedAt, order: .reverse) private var agentRuns: [AgentRunRecord]
@@ -16,6 +17,8 @@ struct ChatView: View {
     @State private var statusMessage: String?
     @State private var currentRunID: UUID?
     @State private var pendingApprovals: [UUID: PendingApproval] = [:]
+    @State private var isDictating = false
+    @State private var webViewRequest: IntegratedWebViewRequest?
 
     init(container: AppContainer, navigateToSection: ((AppSection) -> Void)? = nil) {
         self.container = container
@@ -41,7 +44,8 @@ struct ChatView: View {
                                     traces: tracesForMessage(message),
                                     pendingApproval: pendingApprovals[message.id],
                                     onApprove: { approval in resolveInlineApproval(approval, approved: true) },
-                                    onReject: { approval in resolveInlineApproval(approval, approved: false) }
+                                    onReject: { approval in resolveInlineApproval(approval, approved: false) },
+                                    onHandoff: handleToolHandoff
                                 )
                                     .id(message.id)
                             }
@@ -80,11 +84,13 @@ struct ChatView: View {
 
             HStack(spacing: 10) {
                 Button {
-                    Task { await requestSpeech() }
+                    Task { await toggleDictation() }
                 } label: {
-                    Image(systemName: "mic")
+                    Image(systemName: isDictating ? "stop.circle.fill" : "mic")
                 }
                 .buttonStyle(.bordered)
+                .tint(isDictating ? .red : nil)
+                .disabled(isRunning && !isDictating)
 
                 TextField("Message monGARS", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
@@ -176,6 +182,12 @@ struct ChatView: View {
         .onChange(of: conversations.count) {
             ensureConversationSelected()
         }
+        .onDisappear {
+            stopDictation()
+        }
+        .sheet(item: $webViewRequest) { request in
+            IntegratedWebViewSheet(url: request.url)
+        }
     }
 
     private var activeConversation: Conversation? {
@@ -207,6 +219,9 @@ struct ChatView: View {
     }
 
     private func send() {
+        if isDictating {
+            stopDictation()
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
@@ -272,6 +287,9 @@ struct ChatView: View {
                             assistant.agentRunID = runID
                             assistant.statusText = "Done"
                             assistant.content = response
+                            if let action = ToolHandoffAction.actions(from: response).first(where: { $0.destination == .integratedWebView }) {
+                                webViewRequest = IntegratedWebViewRequest(url: action.url)
+                            }
                             pendingApprovals.removeValue(forKey: assistant.id)
                             statusMessage = nil
                         }
@@ -316,6 +334,15 @@ struct ChatView: View {
         }
     }
 
+    private func handleToolHandoff(_ action: ToolHandoffAction) {
+        switch action.destination {
+        case .integratedWebView:
+            webViewRequest = IntegratedWebViewRequest(url: action.url)
+        case .openURL:
+            openURL(action.url)
+        }
+    }
+
     private func stopCurrentRun() {
         guard let currentRunID,
               let run = agentRuns.first(where: { $0.id == currentRunID }) else {
@@ -344,17 +371,40 @@ struct ChatView: View {
         }
     }
 
-    private func requestSpeech() async {
-        let allowed = await container.speechService.requestAuthorization()
-        await MainActor.run {
-            if allowed {
-                statusMessage = "Speech is authorized. Next step: connect live dictation to fill the message box."
+    private func toggleDictation() async {
+        if isDictating {
+            await MainActor.run {
+                stopDictation()
+                statusMessage = draft.isEmpty ? nil : "Dictation stopped."
+            }
+            return
+        }
+
+        do {
+            await MainActor.run {
+                isDictating = true
+                statusMessage = "Listening..."
                 errorMessage = nil
-            } else {
-                errorMessage = "Speech permission was not granted or is unavailable."
+                isComposerFocused = true
+            }
+            try await container.speechService.startTranscription { transcript in
+                Task { @MainActor in
+                    draft = transcript
+                    statusMessage = "Listening..."
+                }
+            }
+        } catch {
+            await MainActor.run {
+                isDictating = false
                 statusMessage = nil
+                errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func stopDictation() {
+        container.speechService.stopTranscription()
+        isDictating = false
     }
 }
 
@@ -371,6 +421,7 @@ struct MessageBubble: View {
     let pendingApproval: PendingApproval?
     let onApprove: (PendingApproval) -> Void
     let onReject: (PendingApproval) -> Void
+    let onHandoff: (ToolHandoffAction) -> Void
     @State private var isTraceExpanded = false
 
     var body: some View {
@@ -386,6 +437,9 @@ struct MessageBubble: View {
             bubble
             if let pendingApproval {
                 approvalControls(pendingApproval)
+            }
+            if message.role == .assistant {
+                handoffControls
             }
             if message.role == .assistant, !traces.isEmpty {
                 DisclosureGroup(isExpanded: $isTraceExpanded) {
@@ -435,6 +489,20 @@ struct MessageBubble: View {
                 Label("Reject", systemImage: "xmark.circle")
             }
             .buttonStyle(.bordered)
+        }
+    }
+
+    private var handoffControls: some View {
+        let actions = ToolHandoffAction.actions(from: message.content)
+        return HStack(spacing: 8) {
+            ForEach(actions) { action in
+                Button {
+                    onHandoff(action)
+                } label: {
+                    Label(action.label, systemImage: action.systemImage)
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }

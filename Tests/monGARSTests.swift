@@ -43,6 +43,128 @@ struct MonGARSTests {
         #expect(result?.output.contains("5") == true)
     }
 
+    @Test func registryIncludesPrivacyGatedToolSurface() {
+        let (container, _) = makeContext()
+        let toolNames = Set(container.toolRouter.registry.tools.map(\.name))
+        let expected: Set<String> = [
+            "text_message",
+            "phone_call",
+            "email_compose",
+            "reminder_manager",
+            "calendar_manager",
+            "contacts_lookup",
+            "weather_lookup",
+            "maps_lookup",
+            "integrated_webview",
+            "web_fetch",
+            "local_file"
+        ]
+
+        #expect(expected.isSubset(of: toolNames))
+    }
+
+    @Test func toolRouterRoutesPrivacyGatedTools() {
+        let (container, _) = makeContext()
+        let cases: [(String, String)] = [
+            ("text 5551234567 hello", "text_message"),
+            ("call 5551234567", "phone_call"),
+            ("email sam@example.com hello", "email_compose"),
+            ("remind me to check the oven", "reminder_manager"),
+            ("schedule team sync tomorrow", "calendar_manager"),
+            ("find contact Sarah", "contacts_lookup"),
+            ("weather in Montreal", "weather_lookup"),
+            ("map nearest coffee shop", "maps_lookup"),
+            ("open webview https://example.com", "integrated_webview"),
+            ("fetch https://example.com", "web_fetch"),
+            ("write file note.txt content hello", "local_file")
+        ]
+
+        for testCase in cases {
+            #expect(container.toolRouter.route(input: testCase.0)?.name == testCase.1)
+        }
+    }
+
+    @Test func privacyGatedToolsRejectUnapprovedExecution() async throws {
+        let (_, context) = makeContext()
+        let tools: [(any Tool, String)] = [
+            (TextMessageTool(), "text 5551234567 hello"),
+            (PhoneCallTool(), "call 5551234567"),
+            (EmailTool(), "email sam@example.com hello"),
+            (ReminderTool(), "remind me to check the oven"),
+            (CalendarTool(), "schedule team sync tomorrow"),
+            (ContactsTool(), "find contact Sarah"),
+            (WeatherTool(), "weather in Montreal"),
+            (MapsTool(), "map nearest coffee shop"),
+            (WebViewTool(), "open webview https://example.com"),
+            (WebFetchTool(), "fetch https://example.com"),
+            (LocalFileTool(), "write file note.txt content hello")
+        ]
+
+        for (tool, input) in tools {
+            let request = ToolExecutionRequest(runID: UUID(), input: input, autonomyLevel: .auto, approved: false)
+            do {
+                _ = try await tool.execute(request: request, context: context)
+                #expect(Bool(false), "\(tool.name) should require approval")
+            } catch AgentRuntimeError.approvalRequired(let toolName) {
+                #expect(toolName == tool.name)
+            } catch {
+                #expect(Bool(false), "\(tool.name) threw unexpected error: \(error)")
+            }
+        }
+    }
+
+    @Test func approvedLocalFileToolStaysInAgentWorkspace() async throws {
+        let (_, context) = makeContext()
+        let tool = LocalFileTool()
+        let filename = "monGARS-test-\(UUID().uuidString).txt"
+        let runID = UUID()
+
+        _ = try await tool.execute(
+            request: ToolExecutionRequest(runID: runID, input: "delete file \(filename)", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        let write = try await tool.execute(
+            request: ToolExecutionRequest(runID: runID, input: "write file \(filename) content private local note", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+        let list = try await tool.execute(
+            request: ToolExecutionRequest(runID: runID, input: "list files", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+        let read = try await tool.execute(
+            request: ToolExecutionRequest(runID: runID, input: "read file \(filename)", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+        let delete = try await tool.execute(
+            request: ToolExecutionRequest(runID: runID, input: "delete file \(filename)", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        #expect(write.output.contains(filename))
+        #expect(list.output.contains(filename))
+        #expect(read.output == "private local note")
+        #expect(delete.output.contains(filename))
+    }
+
+    @Test func toolHandoffParserBuildsApprovedActions() {
+        let message = """
+        Prepared approved SMS handoff: sms:5551234567&body=hello.
+        Prepared approved phone handoff: tel://5551234567.
+        Prepared approved email handoff: mailto:sam@example.com?body=hello.
+        Prepared approved Maps handoff: http://maps.apple.com/?q=coffee.
+        Approved in-app webview navigation prepared: https://example.com.
+        """
+
+        let actions = ToolHandoffAction.actions(from: message)
+
+        #expect(actions.contains { $0.label == "Open Messages" && $0.destination == .openURL })
+        #expect(actions.contains { $0.label == "Call" && $0.destination == .openURL })
+        #expect(actions.contains { $0.label == "Open Mail" && $0.destination == .openURL })
+        #expect(actions.contains { $0.label == "Open Maps" && $0.destination == .openURL })
+        #expect(actions.contains { $0.label == "Open Web View" && $0.destination == .integratedWebView && $0.url.absoluteString == "https://example.com" })
+    }
+
     @Test func graphRecordsCheckpoints() async throws {
         let (container, context) = makeContext()
         let execution = AgentExecutionContext(
@@ -85,6 +207,46 @@ struct MonGARSTests {
         let conversations = try context.fetch(FetchDescriptor<Conversation>())
         #expect(conversations.count == 1)
         #expect(conversations.first?.messages.first?.content == "Hello")
+    }
+
+    @Test func documentServiceRanksAndHighlightsChunks() throws {
+        let (container, context) = makeContext()
+        let first = DocumentRecord(title: "Architecture.md", content: "Privacy first local agent. " + String(repeating: "telemetry buffer ", count: 12))
+        let second = DocumentRecord(title: "Notes.md", content: "A short note about weather.")
+        context.insert(first)
+        context.insert(second)
+        try container.documentService.rebuildChunks(for: first, context: context)
+        try container.documentService.rebuildChunks(for: second, context: context)
+        try context.save()
+
+        let results = try container.documentService.rankedSnippets(matching: "telemetry buffer", context: context)
+        #expect(results.first?.title == "Architecture.md")
+        #expect(results.first?.highlightedText.contains("**telemetry**") == true)
+        #expect(results.first?.highlightedText.contains("**buffer**") == true)
+        #expect(results.first?.source == "lexical")
+    }
+
+    @Test func documentDeleteRemovesChunks() throws {
+        let (container, context) = makeContext()
+        let document = DocumentRecord(title: "Delete.md", content: String(repeating: "delete chunk ", count: 80))
+        context.insert(document)
+        try container.documentService.rebuildChunks(for: document, context: context)
+        try context.save()
+        #expect(try context.fetch(FetchDescriptor<DocumentChunkRecord>()).isEmpty == false)
+
+        try container.documentService.delete(document, context: context)
+
+        #expect(try context.fetch(FetchDescriptor<DocumentRecord>()).isEmpty)
+        #expect(try context.fetch(FetchDescriptor<DocumentChunkRecord>()).isEmpty)
+    }
+
+    @Test func coreMLEmbeddingProviderReportsUnavailableWithoutBundledModel() {
+        let provider = CoreMLEmbeddingProvider()
+        if case .unavailable(let reason) = provider.status {
+            #expect(reason.contains("DocumentEmbedding") || reason.contains("CoreML"))
+        } else {
+            #expect(Bool(false), "Test environment unexpectedly has a bundled DocumentEmbedding model.")
+        }
     }
 
     @Test func autonomousRuntimeCompletesAndPersistsTrace() async throws {
@@ -300,6 +462,33 @@ struct MonGARSTests {
         #expect(package.prompt.contains("Final instructions:"))
     }
 
+    @Test func contextBuilderProtectsExecuteContractWhenObservationsAreLarge() throws {
+        let (container, context) = makeContext()
+        let builder = ContextBuilder(memoryService: container.memoryService, documentService: container.documentService)
+        var state = AgentLoopState(runID: UUID(), goal: "run remote check")
+        state.selectedToolName = "remote_network"
+        state.observations = Array(repeating: "OVERSIZED_OBSERVATION_PAYLOAD " + String(repeating: "detail ", count: 80), count: 4)
+        let schema = ToolSchema(inputDescription: "Requires explicit user approval before any external network action.", examples: ["remote status check"])
+
+        let package = try builder.build(
+            goal: "run remote check",
+            messages: [],
+            graphState: state,
+            toolResults: [],
+            context: context,
+            phase: .executeTool,
+            selectedToolName: "remote_network",
+            selectedToolSchema: schema,
+            budget: 90
+        )
+
+        #expect(package.prompt.contains("Current phase: executeTool"))
+        #expect(package.prompt.contains("Selected tool: remote_network"))
+        #expect(package.prompt.contains("Tool schema:"))
+        #expect(package.prompt.contains("Final instructions:"))
+        #expect(!package.prompt.contains("OVERSIZED_OBSERVATION_PAYLOAD detail detail detail detail detail detail detail detail detail detail"))
+    }
+
     @Test func contextBuilderUsesSummaryDuringReflection() throws {
         let (container, context) = makeContext()
         let builder = ContextBuilder(memoryService: container.memoryService, documentService: container.documentService)
@@ -345,10 +534,103 @@ struct MonGARSTests {
         #expect(allCheckpoints.contains { $0.nodeID == AgentPhase.askUser.rawValue && $0.stateData != nil })
     }
 
+    @Test func telemetryBufferDefersToolCallPersistenceUntilFlush() throws {
+        let (_, context) = makeContext()
+        let buffer = AgentTelemetryBuffer()
+        let runID = UUID()
+        buffer.appendToolCall(
+            runID: runID,
+            input: "calculate 2 + 3",
+            result: ToolResult(toolName: "calculator", output: "2 + 3 = 5")
+        )
+
+        let beforeFlush = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        #expect(beforeFlush.isEmpty)
+
+        try buffer.flush(runID: runID, to: context)
+
+        let afterFlush = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        #expect(afterFlush.count == 1)
+        #expect(afterFlush.first?.toolName == "calculator")
+        #expect(afterFlush.first?.output == "2 + 3 = 5")
+    }
+
+    @Test func approvalGateCancelRunReleasesSuspendedApproval() async throws {
+        let gate = AgentApprovalGate()
+        let runID = UUID()
+        let approvalID = UUID()
+        let decisionTask = Task {
+            await gate.suspend(runID: runID, approvalID: approvalID)
+        }
+
+        try await Task.sleep(nanoseconds: 10_000_000)
+        await gate.cancel(runID: runID)
+
+        let decision = await decisionTask.value
+        #expect(decision == .rejected)
+    }
+
+    @Test func mockSpeechServiceStreamsPartialTranscript() async throws {
+        let service = MockSpeechService(transcript: "hello monGARS")
+        var partial = ""
+        try await service.startTranscription { text in
+            partial = text
+        }
+
+        let status = await service.status
+        #expect(status == "Mock speech ready")
+        #expect(partial == "hello monGARS")
+        #expect(service.stopCount == 0)
+
+        service.stopTranscription()
+        #expect(service.stopCount == 1)
+    }
+
+    @Test func diagnosticsVisualizationBuildsTimelineAndGraphStates() throws {
+        let runID = UUID()
+        let run = AgentRunRecord(id: runID, goal: "calculate", statusRawValue: AgentRunStatus.waitingForApproval.rawValue, currentPhase: AgentPhase.askUser.rawValue, currentStep: 5)
+        let traces = [
+            AgentTraceRecord(runID: runID, stepIndex: 1, phase: AgentPhase.understandIntent.rawValue, message: "understood"),
+            AgentTraceRecord(runID: runID, stepIndex: 5, phase: AgentPhase.askUser.rawValue, message: "approval")
+        ]
+
+        let rows = DiagnosticsVisualizationBuilder.timelineRows(runs: [run], traces: traces)
+        let nodes = DiagnosticsVisualizationBuilder.graphNodes(for: run, traces: traces)
+
+        #expect(rows.map(\.phase) == [AgentPhase.understandIntent.rawValue, AgentPhase.askUser.rawValue])
+        #expect(nodes.first(where: { $0.phase == .understandIntent })?.state == .completed)
+        #expect(nodes.first(where: { $0.phase == .askUser })?.state == .waiting)
+    }
+
     @Test func providerFallbackReportsLocalCapabilities() async {
         let provider = FoundationModelProvider(fallback: MockLLMProvider())
         #expect(provider.capabilities.isLocal)
         let status = await provider.status
         #expect(status.contains("FoundationModels") || status.contains("fallback"))
+    }
+}
+
+final class MockSpeechService: SpeechService, @unchecked Sendable {
+    private let transcript: String
+    private(set) var stopCount = 0
+
+    init(transcript: String) {
+        self.transcript = transcript
+    }
+
+    var status: String {
+        get async { "Mock speech ready" }
+    }
+
+    func requestAuthorization() async -> Bool {
+        true
+    }
+
+    func startTranscription(onPartial: @escaping @Sendable (String) -> Void) async throws {
+        onPartial(transcript)
+    }
+
+    func stopTranscription() {
+        stopCount += 1
     }
 }
