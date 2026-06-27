@@ -97,6 +97,7 @@ struct AgentLoopState: Sendable, Codable {
     var goal: String
     var phase: AgentPhase = .understandIntent
     var stepIndex: Int = 0
+    var completedNodeIDs: [String] = []
     var plan: AgentPlan?
     var selectedToolName: String?
     var retrievedContext: [String] = []
@@ -115,7 +116,7 @@ enum AgentRuntimeEvent: Sendable {
     case status(runID: UUID, phase: AgentPhase, message: String)
     case trace(runID: UUID, phase: AgentPhase, message: String)
     case partialResponse(runID: UUID, text: String)
-    case approvalRequired(runID: UUID, toolName: String, reason: String)
+    case approvalRequired(runID: UUID, approvalID: UUID, toolName: String, reason: String)
     case completed(runID: UUID, response: String)
 }
 
@@ -125,6 +126,9 @@ enum AgentRuntimeError: LocalizedError {
     case timedOut
     case maxStepsReached
     case approvalRequired(String)
+    case approvalRejected(String)
+    case approvalNotFound
+    case resumeCheckpointUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -133,6 +137,9 @@ enum AgentRuntimeError: LocalizedError {
         case .timedOut: "The agent run timed out."
         case .maxStepsReached: "The agent reached its maximum step limit."
         case .approvalRequired(let action): "Approval is required before running \(action)."
+        case .approvalRejected(let action): "Approval was rejected for \(action)."
+        case .approvalNotFound: "The approval request could not be found."
+        case .resumeCheckpointUnavailable: "No durable checkpoint was available for this run."
         }
     }
 }

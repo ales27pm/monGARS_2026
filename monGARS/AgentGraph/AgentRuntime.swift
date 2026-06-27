@@ -58,12 +58,115 @@ struct AgentReflector: Sendable {
     }
 }
 
+enum ApprovalDecision: Sendable {
+    case approved
+    case rejected
+}
+
+actor AgentApprovalGate {
+    private var continuations: [UUID: CheckedContinuation<ApprovalDecision, Never>] = [:]
+    private var resolvedDecisions: [UUID: ApprovalDecision] = [:]
+
+    func suspend(runID: UUID, approvalID: UUID) async -> ApprovalDecision {
+        if let decision = resolvedDecisions.removeValue(forKey: approvalID) {
+            return decision
+        }
+
+        return await withCheckedContinuation { continuation in
+            continuations[approvalID] = continuation
+        }
+    }
+
+    func resolve(approvalID: UUID, approved: Bool) {
+        let decision: ApprovalDecision = approved ? .approved : .rejected
+        if let continuation = continuations.removeValue(forKey: approvalID) {
+            continuation.resume(returning: decision)
+        } else {
+            resolvedDecisions[approvalID] = decision
+        }
+    }
+}
+
+private struct AgentTraceSnapshot: Sendable {
+    var runID: UUID
+    var stepIndex: Int
+    var phase: String
+    var message: String
+    var toolName: String?
+    var latencyMs: Double
+    var createdAt: Date
+}
+
+private struct AgentCheckpointSnapshot: Sendable {
+    var runID: UUID
+    var nodeID: String
+    var stateSummary: String
+    var stateData: Data?
+    var createdAt: Date
+}
+
+final class AgentTelemetryBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var traces: [AgentTraceSnapshot] = []
+    private var checkpoints: [AgentCheckpointSnapshot] = []
+
+    func appendTrace(runID: UUID, stepIndex: Int, phase: String, message: String, toolName: String? = nil, latencyMs: Double = 0) {
+        let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: message, toolName: toolName, latencyMs: latencyMs, createdAt: .now)
+        lock.withLock {
+            traces.append(snapshot)
+        }
+    }
+
+    func appendCheckpoint(runID: UUID, nodeID: String, stateSummary: String, stateData: Data? = nil) {
+        let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: stateSummary, stateData: stateData, createdAt: .now)
+        lock.withLock {
+            checkpoints.append(snapshot)
+        }
+    }
+
+    func flush(runID: UUID, to context: ModelContext) throws {
+        let payload = lock.withLock {
+            let matchingTraces = traces.filter { $0.runID == runID }
+            let matchingCheckpoints = checkpoints.filter { $0.runID == runID }
+            traces.removeAll { $0.runID == runID }
+            checkpoints.removeAll { $0.runID == runID }
+            return (matchingTraces, matchingCheckpoints)
+        }
+
+        for trace in payload.0 {
+            context.insert(AgentTraceRecord(
+                runID: trace.runID,
+                stepIndex: trace.stepIndex,
+                phase: trace.phase,
+                message: trace.message,
+                toolName: trace.toolName,
+                latencyMs: trace.latencyMs,
+                createdAt: trace.createdAt
+            ))
+        }
+
+        for checkpoint in payload.1 {
+            context.insert(AgentCheckpointRecord(
+                runID: checkpoint.runID,
+                nodeID: checkpoint.nodeID,
+                stateSummary: checkpoint.stateSummary,
+                stateData: checkpoint.stateData,
+                createdAt: checkpoint.createdAt
+            ))
+        }
+
+        try context.safeSave()
+    }
+}
+
 struct AgentLoop: Sendable {
     let planner: AgentPlanner
     let executor: AgentExecutor
     let observer: AgentObserver
     let reflector: AgentReflector
     let contextBuilder: ContextBuilder
+    let approvalGate: AgentApprovalGate
+    let telemetryBuffer: AgentTelemetryBuffer
 
     func run(
         goal: String,
@@ -77,104 +180,12 @@ struct AgentLoop: Sendable {
             Task {
                 let startedAt = Date()
                 var state = AgentLoopState(runID: UUID(), goal: goal)
-                let runRecord = AgentRunRecord(
-                    id: state.runID,
-                    conversationID: conversationID,
-                    goal: goal,
-                    autonomyLevelRawValue: options.autonomyLevel.rawValue,
-                    maxSteps: options.maxSteps
-                )
-                context.insert(runRecord)
+                let runRecord = AgentRunRecord(id: state.runID, conversationID: conversationID, goal: goal, autonomyLevelRawValue: options.autonomyLevel.rawValue, maxSteps: options.maxSteps)
 
                 do {
+                    context.insert(runRecord)
                     try context.safeSave()
-                    try await runPhase(.understandIntent, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        "Intent understood: \(goal)"
-                    }
-
-                    let contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, budget: provider.capabilities.maxContextTokens)
-                    state.retrievedContext = contextPackage.memories + contextPackage.documents
-                    try await runPhase(.retrieveContext, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        "Retrieved \(contextPackage.memories.count) memories and \(contextPackage.documents.count) document snippets."
-                    }
-
-                    state.plan = planner.makePlan(goal: goal, contextPackage: contextPackage)
-                    let planMessage = state.plan?.steps.joined(separator: " -> ") ?? "No plan."
-                    try await runPhase(.plan, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        planMessage
-                    }
-
-                    let tool = executor.selectedTool(for: goal)
-                    state.selectedToolName = tool?.name
-                    try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        tool.map { "Selected tool: \($0.name)" } ?? "No tool required."
-                    }
-
-                    if let tool {
-                        if requiresApproval(tool: tool, autonomyLevel: options.autonomyLevel) {
-                            state.status = .waitingForApproval
-                            runRecord.statusRawValue = state.status.rawValue
-                            runRecord.requiresApproval = true
-                            let reason = "\(tool.name) is \(tool.riskLevel.rawValue) risk or current autonomy is \(options.autonomyLevel.label)."
-                            context.insert(ApprovalRequestRecord(runID: state.runID, actionName: tool.name, reason: reason))
-                            try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context)
-                            try context.safeSave()
-                            continuation.yield(.approvalRequired(runID: state.runID, toolName: tool.name, reason: reason))
-                            continuation.finish()
-                            return
-                        }
-
-                        let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, context: context)
-                        if let result {
-                            state.toolResults.append(result.output)
-                            context.insert(ToolCallRecord(runID: state.runID, toolName: result.toolName, input: goal, output: result.output, riskLevel: result.riskLevel.rawValue, requiresApproval: result.requiresApproval, approved: result.approved))
-                        }
-                        try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                            result?.output ?? "Tool produced no output."
-                        }
-
-                        let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
-                        state.observations.append(observation)
-                        try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                            observation
-                        }
-                    }
-
-                    state.reflection = reflector.reflect(goal: goal, plan: state.plan, observations: state.observations)
-                    let reflectionMessage = state.reflection
-                    try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        reflectionMessage
-                    }
-
-                    let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
-                    var accumulated = ""
-                    for word in response.split(separator: " ") {
-                        try Task.checkCancellation()
-                        accumulated += word + " "
-                        continuation.yield(.partialResponse(runID: state.runID, text: accumulated))
-                    }
-                    state.finalResponse = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let responseMessage = state.finalResponse
-                    try await runPhase(.respond, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                        responseMessage
-                    }
-
-                    if state.plan?.shouldRemember == true {
-                        let memory = durableMemory(from: goal, state: state)
-                        try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
-                        try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                            "Saved memory: \(memory)"
-                        }
-                    }
-
-                    state.status = .completed
-                    runRecord.statusRawValue = state.status.rawValue
-                    runRecord.summary = state.finalResponse
-                    runRecord.completedAt = .now
-                    runRecord.updatedAt = .now
-                    try context.safeSave()
-                    continuation.yield(.completed(runID: state.runID, response: state.finalResponse))
-                    continuation.finish()
+                    try await continueRun(goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context, state: &state, runRecord: runRecord, startedAt: startedAt, continuation: continuation)
                 } catch is CancellationError {
                     finishFailure(.cancelled, state: state, runRecord: runRecord, context: context, continuation: continuation)
                 } catch AgentRuntimeError.paused {
@@ -190,7 +201,8 @@ struct AgentLoop: Sendable {
                         runRecord.statusRawValue = AgentRunStatus.failed.rawValue
                         runRecord.lastError = error.localizedDescription
                         runRecord.updatedAt = .now
-                        try? context.safeSave()
+                        try? recordCheckpoint(state: state, nodeID: AgentRunStatus.failed.rawValue, context: context, includeStateData: true)
+                        try? telemetryBuffer.flush(runID: state.runID, to: context)
                         continuation.finish(throwing: error)
                     }
                 }
@@ -199,11 +211,161 @@ struct AgentLoop: Sendable {
     }
 
     func resume(run: AgentRunRecord, provider: any LLMProvider, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
-        run.statusRawValue = AgentRunStatus.running.rawValue
-        run.requiresApproval = false
-        run.updatedAt = .now
-        try? context.safeSave()
-        return self.run(goal: run.goal, conversationID: run.conversationID, messages: [], provider: provider, options: AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps), context: context)
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+                    let checkpoint = try context.fetch(descriptor).first { $0.runID == run.id && $0.stateData != nil }
+                    guard let data = checkpoint?.stateData else {
+                        throw AgentRuntimeError.resumeCheckpointUnavailable
+                    }
+
+                    var state = try JSONDecoder().decode(AgentLoopState.self, from: data)
+                    run.statusRawValue = AgentRunStatus.running.rawValue
+                    run.requiresApproval = false
+                    run.updatedAt = .now
+                    try context.safeSave()
+                    try await continueRun(
+                        goal: run.goal,
+                        conversationID: run.conversationID,
+                        messages: [],
+                        provider: provider,
+                        options: AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps),
+                        context: context,
+                        state: &state,
+                        runRecord: run,
+                        startedAt: .now,
+                        continuation: continuation
+                    )
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func continueRun(
+        goal: String,
+        conversationID: UUID?,
+        messages: [String],
+        provider: any LLMProvider,
+        options: AgentRuntimeOptions,
+        context: ModelContext,
+        state: inout AgentLoopState,
+        runRecord: AgentRunRecord,
+        startedAt: Date,
+        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation
+    ) async throws {
+        if needsPhase(.understandIntent, state: state) {
+            try await runPhase(.understandIntent, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                "Intent understood: \(goal)"
+            }
+        }
+
+        var contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .retrieveContext, budget: provider.capabilities.maxContextTokens)
+        if needsPhase(.retrieveContext, state: state) {
+            state.retrievedContext = contextPackage.memories + contextPackage.documents
+            try await runPhase(.retrieveContext, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                "Retrieved \(contextPackage.memories.count) memories and \(contextPackage.documents.count) document snippets."
+            }
+        }
+
+        if needsPhase(.plan, state: state) {
+            state.plan = planner.makePlan(goal: goal, contextPackage: contextPackage)
+            let planMessage = state.plan?.steps.joined(separator: " -> ") ?? "No plan."
+            try await runPhase(.plan, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                planMessage
+            }
+        }
+
+        let tool = executor.selectedTool(for: goal)
+        if needsPhase(.selectTool, state: state) {
+            state.selectedToolName = tool?.name
+            try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                tool.map { "Selected tool: \($0.name)" } ?? "No tool required."
+            }
+        }
+
+        if let tool, needsPhase(.executeTool, state: state) {
+            if requiresApproval(tool: tool, autonomyLevel: options.autonomyLevel) {
+                let decision = try await requestApprovalIfNeeded(tool: tool, goal: goal, options: options, state: &state, runRecord: runRecord, context: context, continuation: continuation)
+                guard decision == .approved else {
+                    state.status = .failed
+                    state.finalResponse = "I did not run \(tool.name) because approval was rejected."
+                    runRecord.statusRawValue = state.status.rawValue
+                    runRecord.lastError = AgentRuntimeError.approvalRejected(tool.name).localizedDescription
+                    runRecord.summary = state.finalResponse
+                    runRecord.completedAt = .now
+                    runRecord.updatedAt = .now
+                    try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
+                    try telemetryBuffer.flush(runID: state.runID, to: context)
+                    continuation.yield(.completed(runID: state.runID, response: state.finalResponse))
+                    continuation.finish()
+                    return
+                }
+            }
+
+            _ = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .executeTool, selectedToolName: tool.name, selectedToolSchema: tool.schema, budget: provider.capabilities.maxContextTokens)
+            let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, context: context)
+            if let result {
+                state.toolResults.append(result.output)
+                context.insert(ToolCallRecord(runID: state.runID, toolName: result.toolName, input: goal, output: result.output, riskLevel: result.riskLevel.rawValue, requiresApproval: result.requiresApproval, approved: result.approved))
+            }
+            try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                result?.output ?? "Tool produced no output."
+            }
+
+            let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
+            state.observations.append(observation)
+            try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                observation
+            }
+        }
+
+        if needsPhase(.reflect, state: state) {
+            state.reflection = reflector.reflect(goal: goal, plan: state.plan, observations: state.observations)
+            let reflectionMessage = state.reflection
+            try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                reflectionMessage
+            }
+        }
+
+        contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .reflect, budget: provider.capabilities.maxContextTokens)
+        if needsPhase(.respond, state: state) {
+            if Date().timeIntervalSince(startedAt) > options.timeoutSeconds {
+                throw AgentRuntimeError.timedOut
+            }
+            let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
+            var accumulated = ""
+            for word in response.split(separator: " ") {
+                try Task.checkCancellation()
+                accumulated += word + " "
+                continuation.yield(.partialResponse(runID: state.runID, text: accumulated))
+            }
+            state.finalResponse = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+            let responseMessage = state.finalResponse
+            try await runPhase(.respond, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                responseMessage
+            }
+        }
+
+        if state.plan?.shouldRemember == true, needsPhase(.saveMemory, state: state) {
+            let memory = durableMemory(from: goal, state: state)
+            try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
+            try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                "Saved memory: \(memory)"
+            }
+        }
+
+        state.status = .completed
+        runRecord.statusRawValue = state.status.rawValue
+        runRecord.summary = state.finalResponse
+        runRecord.completedAt = .now
+        runRecord.updatedAt = .now
+        try recordCheckpoint(state: state, nodeID: AgentRunStatus.completed.rawValue, context: context, includeStateData: false)
+        try telemetryBuffer.flush(runID: state.runID, to: context)
+        continuation.yield(.completed(runID: state.runID, response: state.finalResponse))
+        continuation.finish()
     }
 
     private func runPhase(
@@ -234,16 +396,101 @@ struct AgentLoop: Sendable {
         runRecord.currentStep = state.stepIndex
         runRecord.updatedAt = .now
         let text = message()
-        context.insert(AgentTraceRecord(runID: state.runID, stepIndex: state.stepIndex, phase: phase.rawValue, message: text))
-        try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context)
-        try context.safeSave()
+        if !state.completedNodeIDs.contains(phase.rawValue) {
+            state.completedNodeIDs.append(phase.rawValue)
+        }
+        telemetryBuffer.appendTrace(runID: state.runID, stepIndex: state.stepIndex, phase: phase.rawValue, message: text)
+        try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: false)
         continuation.yield(.status(runID: state.runID, phase: phase, message: phase.statusText))
         continuation.yield(.trace(runID: state.runID, phase: phase, message: text))
     }
 
-    private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext) throws {
-        let data = try? JSONEncoder().encode(state)
-        context.insert(AgentCheckpointRecord(runID: state.runID, nodeID: nodeID, stateSummary: state.summary, stateData: data))
+    private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext, includeStateData: Bool) throws {
+        let data = includeStateData ? try? JSONEncoder().encode(state) : nil
+        telemetryBuffer.appendCheckpoint(runID: state.runID, nodeID: nodeID, stateSummary: state.summary, stateData: data)
+    }
+
+    private func needsPhase(_ phase: AgentPhase, state: AgentLoopState) -> Bool {
+        !state.completedNodeIDs.contains(phase.rawValue)
+    }
+
+    private func requestApprovalIfNeeded(
+        tool: any Tool,
+        goal: String,
+        options: AgentRuntimeOptions,
+        state: inout AgentLoopState,
+        runRecord: AgentRunRecord,
+        context: ModelContext,
+        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation
+    ) async throws -> ApprovalDecision {
+        if let approval = try approvalRecord(runID: state.runID, toolName: tool.name, context: context) {
+            if let approved = approval.approved {
+                if approved {
+                    state.status = .running
+                    runRecord.statusRawValue = state.status.rawValue
+                    runRecord.requiresApproval = false
+                    runRecord.updatedAt = .now
+                    try context.safeSave()
+                }
+                return approved ? .approved : .rejected
+            }
+
+            state.status = .waitingForApproval
+            runRecord.statusRawValue = state.status.rawValue
+            runRecord.requiresApproval = true
+            runRecord.updatedAt = .now
+            try context.safeSave()
+            continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
+
+            let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
+            if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue {
+                throw AgentRuntimeError.cancelled
+            }
+            runRecord.requiresApproval = false
+            runRecord.updatedAt = .now
+            if decision == .approved {
+                state.status = .running
+                runRecord.statusRawValue = state.status.rawValue
+                try context.safeSave()
+            }
+            return decision
+        }
+
+        let approval = ApprovalRequestRecord(
+            runID: state.runID,
+            actionName: tool.name,
+            reason: "\(tool.name) is \(tool.riskLevel.rawValue) risk or current autonomy is \(options.autonomyLevel.label)."
+        )
+        context.insert(approval)
+
+        state.status = .waitingForApproval
+        runRecord.statusRawValue = state.status.rawValue
+        runRecord.requiresApproval = true
+        runRecord.updatedAt = .now
+        try await runPhase(.askUser, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+            "Approval requested for \(tool.name): \(approval.reason)"
+        }
+        try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
+        try telemetryBuffer.flush(runID: state.runID, to: context)
+
+        continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
+        let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
+        if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue {
+            throw AgentRuntimeError.cancelled
+        }
+        runRecord.requiresApproval = false
+        runRecord.updatedAt = .now
+        if decision == .approved {
+            state.status = .running
+            runRecord.statusRawValue = state.status.rawValue
+            try context.safeSave()
+        }
+        return decision
+    }
+
+    private func approvalRecord(runID: UUID, toolName: String, context: ModelContext) throws -> ApprovalRequestRecord? {
+        let descriptor = FetchDescriptor<ApprovalRequestRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        return try context.fetch(descriptor).first { $0.runID == runID && $0.actionName == toolName }
     }
 
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
@@ -287,7 +534,8 @@ struct AgentLoop: Sendable {
         runRecord.statusRawValue = status.rawValue
         runRecord.lastError = error(for: status).localizedDescription
         runRecord.updatedAt = .now
-        try? context.safeSave()
+        try? recordCheckpoint(state: state, nodeID: status.rawValue, context: context, includeStateData: true)
+        try? telemetryBuffer.flush(runID: state.runID, to: context)
         continuation.finish(throwing: error(for: status))
     }
 
@@ -309,10 +557,20 @@ struct AgentLoop: Sendable {
 @Observable
 final class AgentRuntime {
     private let loop: AgentLoop
+    private let approvalGate = AgentApprovalGate()
+    private let telemetryBuffer = AgentTelemetryBuffer()
     private var runningTasks: [UUID: Task<Void, Never>] = [:]
 
     init(planner: AgentPlanner, executor: AgentExecutor, observer: AgentObserver, reflector: AgentReflector, contextBuilder: ContextBuilder) {
-        loop = AgentLoop(planner: planner, executor: executor, observer: observer, reflector: reflector, contextBuilder: contextBuilder)
+        loop = AgentLoop(
+            planner: planner,
+            executor: executor,
+            observer: observer,
+            reflector: reflector,
+            contextBuilder: contextBuilder,
+            approvalGate: approvalGate,
+            telemetryBuffer: telemetryBuffer
+        )
     }
 
     func run(goal: String, conversationID: UUID?, messages: [String], provider: any LLMProvider, options: AgentRuntimeOptions, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
@@ -334,6 +592,12 @@ final class AgentRuntime {
         runningTasks[run.id] = nil
         run.statusRawValue = AgentRunStatus.cancelled.rawValue
         run.updatedAt = .now
+        let pendingApprovals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { $0.runID == run.id && $0.approved == nil }
+        for approval in pendingApprovals {
+            approval.approved = false
+            approval.resolvedAt = .now
+            Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
+        }
         try context.safeSave()
     }
 
@@ -341,11 +605,27 @@ final class AgentRuntime {
         approval.approved = true
         approval.resolvedAt = .now
         try context.safeSave()
+        Task { await approvalGate.resolve(approvalID: approval.id, approved: true) }
     }
 
     func reject(_ approval: ApprovalRequestRecord, context: ModelContext) throws {
         approval.approved = false
         approval.resolvedAt = .now
         try context.safeSave()
+        Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
+    }
+
+    func approve(approvalID: UUID, context: ModelContext) throws {
+        guard let approval = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first(where: { $0.id == approvalID }) else {
+            throw AgentRuntimeError.approvalNotFound
+        }
+        try approve(approval, context: context)
+    }
+
+    func reject(approvalID: UUID, context: ModelContext) throws {
+        guard let approval = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first(where: { $0.id == approvalID }) else {
+            throw AgentRuntimeError.approvalNotFound
+        }
+        try reject(approval, context: context)
     }
 }

@@ -3,16 +3,24 @@ import SwiftUI
 
 struct ChatView: View {
     @Bindable var container: AppContainer
+    let navigateToSection: ((AppSection) -> Void)?
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
     @Query(sort: \AgentTraceRecord.createdAt, order: .forward) private var traces: [AgentTraceRecord]
     @Query(sort: \AgentRunRecord.updatedAt, order: .reverse) private var agentRuns: [AgentRunRecord]
+    @FocusState private var isComposerFocused: Bool
     @State private var selectedConversation: Conversation?
     @State private var draft = ""
     @State private var isRunning = false
     @State private var errorMessage: String?
     @State private var statusMessage: String?
     @State private var currentRunID: UUID?
+    @State private var pendingApprovals: [UUID: PendingApproval] = [:]
+
+    init(container: AppContainer, navigateToSection: ((AppSection) -> Void)? = nil) {
+        self.container = container
+        self.navigateToSection = navigateToSection
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,12 +36,22 @@ struct ChatView: View {
                     } else {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(activeMessages) { message in
-                                MessageBubble(message: message, traces: tracesForMessage(message))
+                                MessageBubble(
+                                    message: message,
+                                    traces: tracesForMessage(message),
+                                    pendingApproval: pendingApprovals[message.id],
+                                    onApprove: { approval in resolveInlineApproval(approval, approved: true) },
+                                    onReject: { approval in resolveInlineApproval(approval, approved: false) }
+                                )
                                     .id(message.id)
                             }
                         }
                         .padding()
                     }
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .onTapGesture {
+                    isComposerFocused = false
                 }
                 .onChange(of: activeMessages.count) {
                     if let id = activeMessages.last?.id {
@@ -71,6 +89,8 @@ struct ChatView: View {
                 TextField("Message monGARS", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...5)
+                    .focused($isComposerFocused)
+                    .submitLabel(.send)
                     .onSubmit { send() }
 
                 Button {
@@ -85,9 +105,28 @@ struct ChatView: View {
         }
         .navigationTitle(activeConversation?.title ?? "monGARS")
         .toolbar {
+            if let navigateToSection {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        ForEach(AppSection.allCases) { section in
+                            Button {
+                                isComposerFocused = false
+                                navigateToSection(section)
+                            } label: {
+                                Label(section.title, systemImage: section.icon)
+                            }
+                        }
+                    } label: {
+                        Label("Sections", systemImage: "line.3.horizontal")
+                    }
+                    .accessibilityLabel("Sections")
+                }
+            }
+
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
                     Button {
+                        isComposerFocused = false
                         createConversation()
                     } label: {
                         Label("New Chat", systemImage: "plus")
@@ -97,6 +136,7 @@ struct ChatView: View {
                         Divider()
                         ForEach(conversations) { conversation in
                             Button {
+                                isComposerFocused = false
                                 selectedConversation = conversation
                             } label: {
                                 Label(conversation.title, systemImage: selectedConversation?.id == conversation.id ? "checkmark" : "bubble.left")
@@ -120,6 +160,13 @@ struct ChatView: View {
                     } label: {
                         Label("Stop", systemImage: "stop.fill")
                     }
+                }
+            }
+
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    isComposerFocused = false
                 }
             }
         }
@@ -174,6 +221,7 @@ struct ChatView: View {
         }
 
         draft = ""
+        isComposerFocused = false
         errorMessage = nil
         statusMessage = nil
         isRunning = true
@@ -212,17 +260,19 @@ struct ChatView: View {
                             currentRunID = runID
                             assistant.agentRunID = runID
                             assistant.content = partial
-                        case .approvalRequired(let runID, let toolName, let reason):
+                        case .approvalRequired(let runID, let approvalID, let toolName, let reason):
                             currentRunID = runID
                             assistant.agentRunID = runID
                             assistant.statusText = "Approval required"
                             assistant.content = "I need approval before running \(toolName): \(reason)"
-                            statusMessage = "Approval required for \(toolName). Open Goals to approve or reject."
+                            pendingApprovals[assistant.id] = PendingApproval(id: approvalID, runID: runID, toolName: toolName, reason: reason)
+                            statusMessage = "Approval required for \(toolName)."
                         case .completed(let runID, let response):
                             currentRunID = runID
                             assistant.agentRunID = runID
                             assistant.statusText = "Done"
                             assistant.content = response
+                            pendingApprovals.removeValue(forKey: assistant.id)
                             statusMessage = nil
                         }
                     }
@@ -233,6 +283,7 @@ struct ChatView: View {
                     try? modelContext.save()
                     isRunning = false
                     currentRunID = nil
+                    pendingApprovals.removeValue(forKey: assistant.id)
                 }
             } catch {
                 await MainActor.run {
@@ -241,8 +292,27 @@ struct ChatView: View {
                     errorMessage = error.localizedDescription
                     isRunning = false
                     currentRunID = nil
+                    pendingApprovals.removeValue(forKey: assistant.id)
                 }
             }
+        }
+    }
+
+    private func resolveInlineApproval(_ approval: PendingApproval, approved: Bool) {
+        do {
+            if approved {
+                try container.agentRuntime.approve(approvalID: approval.id, context: modelContext)
+                statusMessage = "Approved \(approval.toolName)."
+            } else {
+                try container.agentRuntime.reject(approvalID: approval.id, context: modelContext)
+                statusMessage = "Rejected \(approval.toolName)."
+            }
+            if let messageID = pendingApprovals.first(where: { $0.value.id == approval.id })?.key {
+                pendingApprovals.removeValue(forKey: messageID)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -265,6 +335,7 @@ struct ChatView: View {
         do {
             try container.memoryService.save(content: draft, context: modelContext)
             draft = ""
+            isComposerFocused = false
             statusMessage = "Saved to memory."
             errorMessage = nil
         } catch {
@@ -287,9 +358,19 @@ struct ChatView: View {
     }
 }
 
+struct PendingApproval: Identifiable, Equatable {
+    let id: UUID
+    let runID: UUID
+    let toolName: String
+    let reason: String
+}
+
 struct MessageBubble: View {
     let message: ChatMessage
     let traces: [AgentTraceRecord]
+    let pendingApproval: PendingApproval?
+    let onApprove: (PendingApproval) -> Void
+    let onReject: (PendingApproval) -> Void
     @State private var isTraceExpanded = false
 
     var body: some View {
@@ -303,6 +384,9 @@ struct MessageBubble: View {
     private var bubbleStack: some View {
         VStack(alignment: .leading, spacing: 8) {
             bubble
+            if let pendingApproval {
+                approvalControls(pendingApproval)
+            }
             if message.role == .assistant, !traces.isEmpty {
                 DisclosureGroup(isExpanded: $isTraceExpanded) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -334,5 +418,23 @@ struct MessageBubble: View {
             .background(message.role == .user ? Color.accentColor : Color(.secondarySystemBackground))
             .foregroundStyle(message.role == .user ? .white : .primary)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func approvalControls(_ approval: PendingApproval) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                onApprove(approval)
+            } label: {
+                Label("Approve", systemImage: "checkmark.circle")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button(role: .destructive) {
+                onReject(approval)
+            } label: {
+                Label("Reject", systemImage: "xmark.circle")
+            }
+            .buttonStyle(.bordered)
+        }
     }
 }

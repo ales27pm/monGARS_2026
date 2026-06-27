@@ -91,7 +91,9 @@ struct RootView: View {
     private func content(for section: AppSection) -> some View {
         switch section {
         case .chat:
-            ChatView(container: container)
+            ChatView(container: container) { section in
+                selection = section
+            }
         case .memories:
             MemoryManagerView(container: container)
                 .navigationTitle(AppSection.memories.title)
