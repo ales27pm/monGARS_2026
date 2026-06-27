@@ -11,6 +11,7 @@ final class AppContainer {
     let toolRegistry: ToolRegistry
     let toolRouter: ToolRouter
     let agentGraph: AgentGraph
+    let agentRuntime: AgentRuntime
     let speechService: SpeechService
 
     var diagnostics = DiagnosticsStore()
@@ -31,6 +32,13 @@ final class AppContainer {
         toolRouter = ToolRouter(registry: toolRegistry)
         speechService = AppleSpeechService()
         agentGraph = AgentGraph.makeDefault(toolRouter: toolRouter)
+        agentRuntime = AgentRuntime(
+            planner: AgentPlanner(),
+            executor: AgentExecutor(toolRouter: toolRouter),
+            observer: AgentObserver(),
+            reflector: AgentReflector(),
+            contextBuilder: ContextBuilder(memoryService: memoryService, documentService: documentService)
+        )
     }
 
     static let schemaModels: [any PersistentModel.Type] = [
@@ -38,7 +46,12 @@ final class AppContainer {
         ChatMessage.self,
         MemoryRecord.self,
         DocumentRecord.self,
-        AgentCheckpointRecord.self
+        AgentCheckpointRecord.self,
+        AgentRunRecord.self,
+        AgentTraceRecord.self,
+        ToolCallRecord.self,
+        ApprovalRequestRecord.self,
+        AgentTaskRecord.self
     ]
 
     func llmProvider() -> any LLMProvider {
@@ -62,7 +75,7 @@ final class AppContainer {
         context.insert(conversation)
         context.insert(MemoryRecord(content: "monGARS keeps chat, memories, and documents local by default.", tags: ["privacy", "local"]))
         context.insert(DocumentRecord(title: "Sample Notes.md", content: "monGARS is a local-first SwiftUI assistant with tool routing, memory search, and document retrieval."))
+        context.insert(AgentTaskRecord(title: "Try the autonomous document summary flow", notes: "Import a Markdown file, then ask monGARS to summarize it and remember key points."))
         try? context.save()
     }
 }
-

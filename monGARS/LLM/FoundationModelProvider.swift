@@ -5,6 +5,7 @@ import Foundation
 
 struct FoundationModelProvider: LLMProvider {
     let name = "Apple Foundation Models"
+    let capabilities = LLMProviderCapabilities.foundationLocal
     private let fallback: any LLMProvider
 
     init(fallback: any LLMProvider) {
@@ -39,4 +40,3 @@ struct FoundationModelProvider: LLMProvider {
         return try await fallback.complete(request: request)
     }
 }
-

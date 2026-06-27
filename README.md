@@ -1,6 +1,6 @@
 # monGARS
 
-monGARS is a native SwiftUI iOS app for a privacy-first AI assistant. It uses local SwiftData storage, an `LLMProvider` abstraction, a small LangGraph-style agent runtime, LangChain-style tools, local memories, document import, speech-ready service boundaries, and diagnostics.
+monGARS is a native SwiftUI iOS app for a privacy-first autonomous assistant. It uses local SwiftData storage, an `LLMProvider` abstraction, a LangGraph-style workflow layer, a working autonomous agent loop, LangChain-style tools, local memories, document import, speech-ready service boundaries, approval gates, goals/tasks, and diagnostics.
 
 ## Requirements
 
@@ -35,8 +35,8 @@ xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platfor
 Current verification on this machine:
 
 - App build succeeded for generic iOS Simulator.
-- Test build succeeded on an isolated `monGARS Test iPhone` simulator.
-- Actual simulator test execution stalled in Xcode before the test runner emitted output, so the verified checkpoint is test compilation rather than completed runtime execution.
+- Test build succeeded for generic iOS Simulator.
+- Actual simulator boot/test execution still stalls at CoreSimulator "Waiting on System App", so the verified checkpoint is app/test compilation rather than completed runtime execution.
 
 ## Project Structure
 
@@ -44,15 +44,29 @@ Current verification on this machine:
 - `monGARS/Models`: SwiftData models.
 - `monGARS/Persistence`: persistence helpers and local error types.
 - `monGARS/LLM`: provider protocol and Foundation/mock/remote providers.
-- `monGARS/AgentGraph`: graph state, nodes, edges, checkpoints, resume support.
-- `monGARS/Tools`: tool protocol, registry, router, date/time, calculator, memory lookup, document summary.
-- `monGARS/Memory`: memory service.
+- `monGARS/AgentGraph`: graph state, autonomous runtime, planner, executor, observer, reflector, context builder, checkpoints, resume support.
+- `monGARS/Tools`: schema/risk-aware tool protocol, registry, router, calculator, date/time, memory tools, document tools, conversation search, diagnostics, tasks, disabled remote stub.
+- `monGARS/Memory`: scored, deduplicated, searchable, editable, exportable local memory service.
 - `monGARS/Documents`: document import and keyword retrieval.
 - `monGARS/Speech`: speech service abstraction and Apple Speech permission implementation.
-- `monGARS/Views`: chat, conversations, settings, memories, documents, diagnostics.
+- `monGARS/Views`: compact/regular root navigation, chat, settings, memories, documents, goals/tasks, diagnostics.
 - `Tests`: unit tests.
 
 ## Privacy Defaults
 
 The default provider mode is Foundation Models with local mock fallback. Remote mode does not make network requests unless the user selects Remote Endpoint and enables the network toggle in Settings.
 
+## Autonomous Agent Loop
+
+Chat requests now run through `AgentRuntime`:
+
+1. understand intent
+2. retrieve local context
+3. plan
+4. select and execute tools
+5. observe results
+6. reflect
+7. respond
+8. save durable memory when requested
+
+Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoints. Risky/destructive/external actions create approval requests visible in Goals.

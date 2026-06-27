@@ -75,7 +75,8 @@ struct AgentGraph: Sendable {
                         state.completedNodeIDs.append(node.id)
 
                         let checkpoint = AgentCheckpoint(runID: state.runID, nodeID: node.id, summary: state.summary, state: state)
-                        context.context.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.summary))
+                        let stateData = try? JSONEncoder().encode(state)
+                        context.context.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.summary, stateData: stateData))
                         try? context.context.save()
                         await context.event(.checkpoint(checkpoint))
                         continuation.yield(.checkpoint(checkpoint))
@@ -161,6 +162,86 @@ struct AgentGraph: Sendable {
                 AgentEdge(from: "route", to: "retrieve", condition: { $0.selectedToolName == nil }),
                 AgentEdge(from: "tool", to: "respond", condition: { _ in true }),
                 AgentEdge(from: "retrieve", to: "respond", condition: { _ in true })
+            ]
+        )
+    }
+
+    static func makeAutonomous(toolRouter: ToolRouter) -> AgentGraph {
+        func simpleNode(_ id: String, transform: @escaping @Sendable (AgentState, AgentExecutionContext) async throws -> AgentState) -> AgentNode {
+            AgentNode(id: id, run: transform)
+        }
+
+        let understand = simpleNode("UnderstandIntent") { state, _ in state }
+        let retrieve = simpleNode("RetrieveContext") { state, execution in
+            var next = state
+            next.retrievedContext = try DocumentService().snippets(matching: state.userInput, context: execution.context)
+            return next
+        }
+        let plan = simpleNode("Plan") { state, _ in
+            var next = state
+            next.messages.append("Plan: retrieve context, select tools, observe, reflect, respond, remember if useful.")
+            return next
+        }
+        let selectTool = simpleNode("SelectTool") { state, execution in
+            var next = state
+            next.selectedToolName = execution.toolRouter.route(input: state.userInput)?.name
+            return next
+        }
+        let executeTool = simpleNode("ExecuteTool") { state, execution in
+            var next = state
+            if let result = try await execution.toolRouter.execute(input: state.userInput, context: execution.context) {
+                next.toolOutput = result.output
+                await execution.event(.toolCall(tool: result.toolName, input: state.userInput, output: result.output))
+            }
+            return next
+        }
+        let observe = simpleNode("ObserveResult") { state, _ in
+            var next = state
+            next.messages.append("Observation: \(state.toolOutput ?? state.retrievedContext.joined(separator: " "))")
+            return next
+        }
+        let reflect = simpleNode("Reflect") { state, _ in
+            var next = state
+            next.messages.append("Reflection: answer is based on local context/tool output.")
+            return next
+        }
+        let respond = simpleNode("Respond") { state, execution in
+            var next = state
+            if let toolOutput = state.toolOutput {
+                next.finalResponse = toolOutput
+            } else {
+                let request = LLMRequest(prompt: state.userInput, conversationContext: state.messages, retrievedContext: state.retrievedContext)
+                let response = try await execution.llmProvider.complete(request: request)
+                next.finalResponse = response.text
+            }
+            return next
+        }
+        let askUser = simpleNode("AskUser") { state, _ in state }
+        let saveMemory = simpleNode("SaveMemory") { state, execution in
+            var next = state
+            if state.userInput.lowercased().contains("remember") {
+                try MemoryService().save(content: state.finalResponse.isEmpty ? state.userInput : state.finalResponse, source: "agentGraph", scope: "longTerm", context: execution.context)
+                next.messages.append("Saved memory.")
+            }
+            return next
+        }
+
+        return AgentGraph(
+            startNodeID: "UnderstandIntent",
+            nodes: [understand, retrieve, plan, selectTool, executeTool, observe, reflect, respond, askUser, saveMemory],
+            edges: [
+                AgentEdge(from: "UnderstandIntent", to: "RetrieveContext", condition: { _ in true }),
+                AgentEdge(from: "RetrieveContext", to: "Plan", condition: { _ in true }),
+                AgentEdge(from: "Plan", to: "SelectTool", condition: { _ in true }),
+                AgentEdge(from: "SelectTool", to: "AskUser", condition: { $0.selectedToolName?.contains("delete") == true || $0.selectedToolName?.contains("remote") == true }),
+                AgentEdge(from: "SelectTool", to: "ExecuteTool", condition: { $0.selectedToolName != nil }),
+                AgentEdge(from: "SelectTool", to: "Reflect", condition: { $0.selectedToolName == nil }),
+                AgentEdge(from: "ExecuteTool", to: "ObserveResult", condition: { $0.toolOutput != nil }),
+                AgentEdge(from: "ExecuteTool", to: "AskUser", condition: { $0.toolOutput == nil }),
+                AgentEdge(from: "ObserveResult", to: "Reflect", condition: { _ in true }),
+                AgentEdge(from: "Reflect", to: "Respond", condition: { _ in true }),
+                AgentEdge(from: "Respond", to: "SaveMemory", condition: { $0.userInput.lowercased().contains("remember") }),
+                AgentEdge(from: "Respond", to: "SaveMemory", condition: { $0.userInput.lowercased().contains("key point") })
             ]
         )
     }

@@ -11,8 +11,22 @@ struct LLMResponse: Sendable {
     var providerName: String
 }
 
+struct LLMProviderCapabilities: Sendable, Codable {
+    var supportsStreaming: Bool
+    var supportsTools: Bool
+    var supportsVision: Bool
+    var supportsJSONMode: Bool
+    var maxContextTokens: Int
+    var isLocal: Bool
+
+    static let mockLocal = LLMProviderCapabilities(supportsStreaming: true, supportsTools: false, supportsVision: false, supportsJSONMode: true, maxContextTokens: 4_000, isLocal: true)
+    static let foundationLocal = LLMProviderCapabilities(supportsStreaming: false, supportsTools: false, supportsVision: false, supportsJSONMode: false, maxContextTokens: 4_000, isLocal: true)
+    static let remote = LLMProviderCapabilities(supportsStreaming: false, supportsTools: false, supportsVision: false, supportsJSONMode: true, maxContextTokens: 8_000, isLocal: false)
+}
+
 protocol LLMProvider: Sendable {
     var name: String { get }
+    var capabilities: LLMProviderCapabilities { get }
     var status: String { get async }
     func complete(request: LLMRequest) async throws -> LLMResponse
     func stream(request: LLMRequest) -> AsyncThrowingStream<String, Error>
@@ -54,4 +68,3 @@ enum LLMProviderError: LocalizedError {
         }
     }
 }
-

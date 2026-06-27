@@ -16,6 +16,20 @@ struct SettingsView: View {
                 Text(container.diagnostics.providerStatus)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                let capabilities = container.llmProvider().capabilities
+                LabeledContent("Local") {
+                    Text(capabilities.isLocal ? "Yes" : "No")
+                }
+                LabeledContent("Streaming") {
+                    Text(capabilities.supportsStreaming ? "Yes" : "No")
+                }
+                LabeledContent("JSON Mode") {
+                    Text(capabilities.supportsJSONMode ? "Yes" : "No")
+                }
+                LabeledContent("Max Context") {
+                    Text("\(capabilities.maxContextTokens) tokens")
+                }
             }
 
             Section("Remote Endpoint") {
@@ -24,6 +38,18 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Text("Remote calls are disabled unless the toggle is on. Mock and Foundation modes make no developer-backend network requests.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Autonomy") {
+                Picker("Level", selection: autonomyLevel) {
+                    ForEach(AutonomyLevel.allCases) { level in
+                        Text(level.label).tag(level)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Manual and Assisted modes ask before risky tool use. Network, file deletion, destructive, privacy-sensitive, and external actions remain blocked behind approval gates.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -63,6 +89,14 @@ struct SettingsView: View {
             container.settingsStore.remoteEndpoint
         } set: { value in
             container.settingsStore.remoteEndpoint = value
+        }
+    }
+
+    private var autonomyLevel: Binding<AutonomyLevel> {
+        Binding {
+            container.settingsStore.autonomyLevel
+        } set: { value in
+            container.settingsStore.autonomyLevel = value
         }
     }
 }

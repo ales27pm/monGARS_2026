@@ -5,99 +5,129 @@ struct ChatView: View {
     @Bindable var container: AppContainer
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Conversation.updatedAt, order: .reverse) private var conversations: [Conversation]
+    @Query(sort: \AgentTraceRecord.createdAt, order: .forward) private var traces: [AgentTraceRecord]
+    @Query(sort: \AgentRunRecord.updatedAt, order: .reverse) private var agentRuns: [AgentRunRecord]
     @State private var selectedConversation: Conversation?
     @State private var draft = ""
     @State private var isRunning = false
     @State private var errorMessage: String?
+    @State private var statusMessage: String?
+    @State private var currentRunID: UUID?
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedConversation) {
-                ForEach(conversations) { conversation in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(conversation.title)
-                            .font(.headline)
-                            .lineLimit(1)
-                        Text(conversation.updatedAt, style: .date)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .tag(conversation)
-                }
-                .onDelete(perform: deleteConversation)
-            }
-            .navigationTitle("Conversations")
-            .toolbar {
-                Button {
-                    createConversation()
-                } label: {
-                    Label("New Chat", systemImage: "square.and.pencil")
-                }
-            }
-        } detail: {
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ScrollView {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if activeMessages.isEmpty {
+                        ContentUnavailableView(
+                            "monGARS",
+                            systemImage: "sparkles",
+                            description: Text("Ask me for a calculation, a saved memory, a document summary, or anything you want to work through.")
+                        )
+                        .padding(.top, 80)
+                    } else {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(activeConversation?.messages.sorted(by: { $0.createdAt < $1.createdAt }) ?? []) { message in
-                                MessageBubble(message: message)
+                            ForEach(activeMessages) { message in
+                                MessageBubble(message: message, traces: tracesForMessage(message))
                                     .id(message.id)
                             }
                         }
                         .padding()
                     }
-                    .onChange(of: activeConversation?.messages.count ?? 0) {
-                        if let id = activeConversation?.messages.sorted(by: { $0.createdAt < $1.createdAt }).last?.id {
-                            proxy.scrollTo(id, anchor: .bottom)
+                }
+                .onChange(of: activeMessages.count) {
+                    if let id = activeMessages.last?.id {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await requestSpeech() }
+                } label: {
+                    Image(systemName: "mic")
+                }
+                .buttonStyle(.bordered)
+
+                TextField("Message monGARS", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                    .onSubmit { send() }
+
+                Button {
+                    send()
+                } label: {
+                    Image(systemName: isRunning ? "hourglass" : "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning)
+            }
+            .padding()
+        }
+        .navigationTitle(activeConversation?.title ?? "monGARS")
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        createConversation()
+                    } label: {
+                        Label("New Chat", systemImage: "plus")
+                    }
+
+                    if !conversations.isEmpty {
+                        Divider()
+                        ForEach(conversations) { conversation in
+                            Button {
+                                selectedConversation = conversation
+                            } label: {
+                                Label(conversation.title, systemImage: selectedConversation?.id == conversation.id ? "checkmark" : "bubble.left")
+                            }
                         }
                     }
+                } label: {
+                    Label("Conversations", systemImage: "sidebar.left")
                 }
 
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal)
-                }
-
-                HStack(spacing: 10) {
-                    Button {
-                        Task { await requestSpeech() }
-                    } label: {
-                        Image(systemName: "mic")
-                    }
-                    .buttonStyle(.bordered)
-
-                    TextField("Message monGARS", text: $draft, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...5)
-                        .onSubmit { send() }
-
-                    Button {
-                        send()
-                    } label: {
-                        Image(systemName: isRunning ? "hourglass" : "paperplane.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isRunning)
-                }
-                .padding()
-            }
-            .navigationTitle(activeConversation?.title ?? "Chat")
-            .toolbar {
                 Button {
                     saveDraftAsMemory()
                 } label: {
                     Label("Save Memory", systemImage: "plus.circle")
                 }
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                if isRunning {
+                    Button {
+                        stopCurrentRun()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                }
             }
         }
         .onAppear {
-            if selectedConversation == nil {
-                selectedConversation = conversations.first
-            }
+            ensureConversationSelected()
+        }
+        .onChange(of: conversations.count) {
+            ensureConversationSelected()
         }
     }
 
@@ -105,30 +135,47 @@ struct ChatView: View {
         selectedConversation ?? conversations.first
     }
 
+    private var activeMessages: [ChatMessage] {
+        (activeConversation?.messages ?? []).sorted { $0.createdAt < $1.createdAt }
+    }
+
+    private func ensureConversationSelected() {
+        if selectedConversation == nil {
+            selectedConversation = conversations.first
+        }
+    }
+
+    private func tracesForMessage(_ message: ChatMessage) -> [AgentTraceRecord] {
+        guard let runID = message.agentRunID else { return [] }
+        return traces.filter { $0.runID == runID }
+    }
+
     private func createConversation() {
         let conversation = Conversation()
         modelContext.insert(conversation)
         try? modelContext.save()
         selectedConversation = conversation
-    }
-
-    private func deleteConversation(_ offsets: IndexSet) {
-        for index in offsets {
-            modelContext.delete(conversations[index])
-        }
-        try? modelContext.save()
+        statusMessage = nil
+        errorMessage = nil
     }
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let conversation = activeConversation ?? Conversation()
-        if activeConversation == nil {
-            modelContext.insert(conversation)
-            selectedConversation = conversation
+
+        let conversation: Conversation
+        if let current = activeConversation {
+            conversation = current
+        } else {
+            let created = Conversation()
+            modelContext.insert(created)
+            selectedConversation = created
+            conversation = created
         }
+
         draft = ""
         errorMessage = nil
+        statusMessage = nil
         isRunning = true
 
         let userMessage = ChatMessage(role: .user, content: text)
@@ -144,29 +191,48 @@ struct ChatView: View {
         Task {
             do {
                 let history = conversation.messages.map { "\($0.role.rawValue): \($0.content)" }
-                let execution = AgentExecutionContext(
-                    llmProvider: container.llmProvider(),
-                    toolRouter: container.toolRouter,
-                    context: modelContext,
-                    event: { event in
-                        await MainActor.run { container.diagnostics.record(event: event) }
-                    }
+                let options = AgentRuntimeOptions(
+                    autonomyLevel: container.settingsStore.autonomyLevel,
+                    maxSteps: 12,
+                    timeoutSeconds: 45
                 )
-                for try await event in container.agentGraph.run(input: text, messages: history, context: execution) {
+
+                for try await event in container.agentRuntime.run(goal: text, conversationID: conversation.id, messages: history, provider: container.llmProvider(), options: options, context: modelContext) {
                     await MainActor.run {
-                        container.diagnostics.record(event: event)
-                        if case .partialResponse(let partial) = event {
+                        switch event {
+                        case .status(let runID, let phase, let message):
+                            currentRunID = runID
+                            assistant.agentRunID = runID
+                            assistant.statusText = phase.statusText
+                            statusMessage = message
+                            container.diagnostics.graphSteps.append(phase.rawValue)
+                        case .trace(_, let phase, let message):
+                            container.diagnostics.graphSteps.append("\(phase.rawValue): \(message)")
+                        case .partialResponse(let runID, let partial):
+                            currentRunID = runID
+                            assistant.agentRunID = runID
                             assistant.content = partial
-                        }
-                        if case .checkpoint(let checkpoint) = event, checkpoint.nodeID == "respond" {
-                            assistant.content = checkpoint.state.finalResponse
+                        case .approvalRequired(let runID, let toolName, let reason):
+                            currentRunID = runID
+                            assistant.agentRunID = runID
+                            assistant.statusText = "Approval required"
+                            assistant.content = "I need approval before running \(toolName): \(reason)"
+                            statusMessage = "Approval required for \(toolName). Open Goals to approve or reject."
+                        case .completed(let runID, let response):
+                            currentRunID = runID
+                            assistant.agentRunID = runID
+                            assistant.statusText = "Done"
+                            assistant.content = response
+                            statusMessage = nil
                         }
                     }
                 }
+
                 await MainActor.run {
                     conversation.updatedAt = .now
                     try? modelContext.save()
                     isRunning = false
+                    currentRunID = nil
                 }
             } catch {
                 await MainActor.run {
@@ -174,8 +240,24 @@ struct ChatView: View {
                     container.diagnostics.lastError = error.localizedDescription
                     errorMessage = error.localizedDescription
                     isRunning = false
+                    currentRunID = nil
                 }
             }
+        }
+    }
+
+    private func stopCurrentRun() {
+        guard let currentRunID,
+              let run = agentRuns.first(where: { $0.id == currentRunID }) else {
+            isRunning = false
+            return
+        }
+        do {
+            try container.agentRuntime.cancel(run: run, context: modelContext)
+            statusMessage = "Agent run stopped."
+            isRunning = false
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -183,36 +265,74 @@ struct ChatView: View {
         do {
             try container.memoryService.save(content: draft, context: modelContext)
             draft = ""
+            statusMessage = "Saved to memory."
+            errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+            statusMessage = nil
         }
     }
 
     private func requestSpeech() async {
         let allowed = await container.speechService.requestAuthorization()
         await MainActor.run {
-            errorMessage = allowed ? "Speech is authorized. Live dictation UI can be connected from this service." : "Speech permission was not granted or is unavailable."
+            if allowed {
+                statusMessage = "Speech is authorized. Next step: connect live dictation to fill the message box."
+                errorMessage = nil
+            } else {
+                errorMessage = "Speech permission was not granted or is unavailable."
+                statusMessage = nil
+            }
         }
     }
 }
 
 struct MessageBubble: View {
     let message: ChatMessage
+    let traces: [AgentTraceRecord]
+    @State private var isTraceExpanded = false
 
     var body: some View {
-        HStack {
-            if message.role == .assistant { bubble }
+        HStack(alignment: .top) {
+            if message.role == .assistant { bubbleStack }
             Spacer(minLength: message.role == .assistant ? 40 : 80)
-            if message.role == .user { bubble }
+            if message.role == .user { bubbleStack }
+        }
+    }
+
+    private var bubbleStack: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            bubble
+            if message.role == .assistant, !traces.isEmpty {
+                DisclosureGroup(isExpanded: $isTraceExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(traces) { trace in
+                            Text("\(trace.stepIndex). \(trace.phase): \(trace.message)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    Label("Agent Trace", systemImage: "list.bullet.rectangle")
+                        .font(.caption)
+                }
+            }
         }
     }
 
     private var bubble: some View {
-        Text(message.content.isEmpty ? "Thinking..." : message.content)
+        VStack(alignment: .leading, spacing: 4) {
+            if let status = message.statusText, message.role == .assistant {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(message.content.isEmpty ? "Thinking..." : message.content)
+        }
             .padding(12)
             .background(message.role == .user ? Color.accentColor : Color(.secondarySystemBackground))
             .foregroundStyle(message.role == .user ? .white : .primary)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
-

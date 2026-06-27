@@ -2,6 +2,7 @@ import Foundation
 
 struct RemoteLLMProvider: LLMProvider {
     let name = "Remote Endpoint"
+    let capabilities = LLMProviderCapabilities.remote
     var endpoint: String
     var isEnabled: Bool
 
@@ -33,4 +34,3 @@ struct RemoteLLMProvider: LLMProvider {
         return LLMResponse(text: text, providerName: name)
     }
 }
-

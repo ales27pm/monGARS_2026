@@ -2,6 +2,7 @@ import Foundation
 
 struct MockLLMProvider: LLMProvider {
     let name = "Mock Local"
+    let capabilities = LLMProviderCapabilities.mockLocal
     var status: String { get async { "Deterministic local fallback ready" } }
 
     func complete(request: LLMRequest) async throws -> LLMResponse {
@@ -27,4 +28,3 @@ struct MockLLMProvider: LLMProvider {
         return LLMResponse(text: text, providerName: name)
     }
 }
-

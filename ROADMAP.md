@@ -4,6 +4,8 @@
 
 - Add richer document retrieval with chunk ranking and highlighted matches.
 - Add editable conversation titles and message retry/regenerate controls.
+- Add true continuation from approval checkpoints instead of restarting the run goal after approval.
+- Add richer memory editor UI for edit/export/forget-all service operations.
 - Add live speech recognition after permission approval, keeping `SpeechService` as the boundary.
 - Add UI tests once simulator execution is stable on the target machine.
 
@@ -20,4 +22,3 @@
 - Add App Intents for privacy-safe shortcuts.
 - Add model availability diagnostics for Foundation Models-capable devices.
 - Add CI using `build-for-testing` and simulator smoke tests.
-
