@@ -3,6 +3,9 @@ import Foundation
 #if canImport(PDFKit)
 import PDFKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct PDFTextExtractionResult: Sendable, Equatable {
     var pageTexts: [String]
@@ -40,6 +43,24 @@ enum PDFTextExtractor {
         return PDFTextExtractionResult(pageTexts: pageTexts)
         #else
         throw PersistenceError.importFailed("PDFKit is unavailable on this platform.")
+        #endif
+    }
+}
+
+enum DiagnosticPDFFactory {
+    static func makeSelectablePDFData(text: String) -> Data? {
+        #if canImport(UIKit)
+        let data = NSMutableData()
+        UIGraphicsBeginPDFContextToData(data, CGRect(x: 0, y: 0, width: 300, height: 180), nil)
+        UIGraphicsBeginPDFPage()
+        (text as NSString).draw(
+            at: CGPoint(x: 24, y: 64),
+            withAttributes: [.font: UIFont.systemFont(ofSize: 14)]
+        )
+        UIGraphicsEndPDFContext()
+        return data as Data
+        #else
+        return nil
         #endif
     }
 }

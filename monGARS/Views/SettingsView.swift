@@ -168,9 +168,9 @@ struct SettingsView: View {
                     Task { await runDeveloperDiagnostics() }
                 } label: {
                     if isRunningDeveloperDiagnostics {
-                        Label("Running Real Tool E2E...", systemImage: "hourglass")
+                        Label("Running Full Real Tool E2E...", systemImage: "hourglass")
                     } else {
-                        Label("Run Real Tool E2E & Export Report", systemImage: "stethoscope")
+                        Label("Run Full Real Tool E2E & Export Report", systemImage: "stethoscope")
                     }
                 }
                 .disabled(isRunningDeveloperDiagnostics)
@@ -481,8 +481,18 @@ struct SettingsView: View {
 
     private func testPDFKitAvailability() {
         #if canImport(PDFKit)
-        let available = PDFDocument(data: Data("%PDF-1.4\n%EOF".utf8)) != nil
-        nativeToolTestStatus = available ? "PDFKit is available." : "PDFKit framework loaded, but the sample PDF could not be opened."
+        guard let data = DiagnosticPDFFactory.makeSelectablePDFData(text: "monGARS PDFKit diagnostic") else {
+            nativeToolTestStatus = "PDFKit framework loaded, but this platform could not generate a diagnostic PDF."
+            return
+        }
+        do {
+            let extraction = try PDFTextExtractor.extract(data: data)
+            nativeToolTestStatus = extraction.text.contains("monGARS PDFKit diagnostic")
+                ? "PDFKit is available and text extraction works."
+                : "PDFKit opened the diagnostic PDF, but text extraction returned unexpected content."
+        } catch {
+            nativeToolTestStatus = "PDFKit framework loaded, but text extraction failed: \(error.localizedDescription)"
+        }
         #else
         nativeToolTestStatus = "PDFKit is unavailable on this platform."
         #endif

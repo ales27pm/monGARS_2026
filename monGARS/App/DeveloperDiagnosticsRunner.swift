@@ -100,14 +100,18 @@ enum DeveloperDiagnosticsRunner {
         let runID = UUID()
         var results: [ToolE2EResult] = []
 
-        func approved(_ input: String, network: Bool = false) -> ToolExecutionRequest {
+        func request(_ input: String, approved: Bool = true, network: Bool = false) -> ToolExecutionRequest {
             ToolExecutionRequest(
                 runID: runID,
                 input: input,
                 autonomyLevel: .assisted,
-                approved: true,
+                approved: approved,
                 networkAccessAllowed: network && container.settingsStore.remoteProviderEnabled
             )
+        }
+
+        func approved(_ input: String, network: Bool = false) -> ToolExecutionRequest {
+            request(input, approved: true, network: network)
         }
 
         func record(_ label: String, _ result: ToolResult, expected: (ToolResult) -> Bool) {
@@ -119,6 +123,26 @@ enum DeveloperDiagnosticsRunner {
                 statusCode: result.statusCode,
                 errorCategory: result.errorCategory,
                 output: result.output
+            ))
+        }
+
+        func recordSynthetic(
+            _ label: String,
+            toolName: String,
+            passed: Bool,
+            output: String,
+            target: String? = nil,
+            statusCode: Int? = nil,
+            errorCategory: String? = nil
+        ) {
+            results.append(ToolE2EResult(
+                label: label,
+                toolName: toolName,
+                passed: passed,
+                target: target,
+                statusCode: statusCode,
+                errorCategory: errorCategory,
+                output: output
             ))
         }
 
@@ -164,6 +188,22 @@ enum DeveloperDiagnosticsRunner {
             let summary = try await DocumentSummaryTool(documentService: container.documentService).execute(request: approved("summarize my imported document"), context: context)
             record("document summary", summary) { !$0.output.contains("No documents") }
             try container.documentService.delete(document, context: context)
+
+            #if canImport(PDFKit)
+            if let pdfData = DiagnosticPDFFactory.makeSelectablePDFData(text: "\(marker) selectable PDF import text") {
+                let pdfURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(marker)-diagnostic.pdf")
+                try pdfData.write(to: pdfURL, options: .atomic)
+                defer { try? FileManager.default.removeItem(at: pdfURL) }
+                try container.documentService.importDocument(url: pdfURL, context: context)
+                let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved("selectable PDF import text"), context: context)
+                record("PDF document import and search", pdfSearch) { $0.output.contains("selectable PDF import text") }
+                if let importedPDF = try container.documentService.documents(context: context).first(where: { $0.title == pdfURL.lastPathComponent }) {
+                    try container.documentService.delete(importedPDF, context: context)
+                }
+            } else {
+                recordSynthetic("PDF document import and search", toolName: "document_search", passed: false, output: "Could not generate diagnostic PDF data.", errorCategory: "pdf_generation_unavailable")
+            }
+            #endif
         } catch { recordError("document search/summary", toolName: "documents", error: error) }
 
         do {
@@ -211,9 +251,24 @@ enum DeveloperDiagnosticsRunner {
             record: record,
             recordError: recordError
         )
+        await appendPolicyAndNegativeE2E(
+            context: context,
+            request: request,
+            record: record,
+            recordSynthetic: recordSynthetic,
+            recordError: recordError
+        )
+        appendExtractionAndRedactionE2E(recordSynthetic: recordSynthetic)
 
         let passed = results.filter(\.passed).count
+        let registryToolNames = Set(container.toolRouter.registry.tools.map(\.name))
+        let coveredToolNames = registryToolNames.intersection(Set(results.map(\.toolName)))
+        let missingToolNames = registryToolNames.subtracting(coveredToolNames).sorted()
         builder.add("- Summary: \(passed)/\(results.count) probes passed")
+        builder.add("- Tool coverage: \(coveredToolNames.count)/\(registryToolNames.count) registry tools")
+        if !missingToolNames.isEmpty {
+            builder.add("- Missing registry tool probes: \(missingToolNames.joined(separator: ", "))")
+        }
         for result in results {
             builder.add(result.reportLine)
         }
@@ -390,6 +445,347 @@ enum DeveloperDiagnosticsRunner {
         }
     }
 
+    @MainActor
+    private static func appendPolicyAndNegativeE2E(
+        context: ModelContext,
+        request: (String, Bool, Bool) -> ToolExecutionRequest,
+        record: (String, ToolResult, (ToolResult) -> Bool) -> Void,
+        recordSynthetic: (String, String, Bool, String, String?, Int?, String?) -> Void,
+        recordError: (String, String, Error) -> Void
+    ) async {
+        await recordApprovalRejection(
+            label: "SMS approval rejection",
+            toolName: "text_message",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await TextMessageTool().execute(
+                request: request("text +15551234567 should not send", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "phone approval rejection",
+            toolName: "phone_call",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await PhoneCallTool().execute(
+                request: request("call +15551234567", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "email inbox approval rejection",
+            toolName: "email_inbox",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await EmailInboxTool().execute(
+                request: request("read my latest email", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "email compose approval rejection",
+            toolName: "email_compose",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await EmailTool().execute(
+                request: request("email e2e@example.com should not prepare", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "reminder approval rejection",
+            toolName: "reminder_manager",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await ReminderTool().execute(
+                request: request("remind me to should not create", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "calendar approval rejection",
+            toolName: "calendar_manager",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await CalendarTool().execute(
+                request: request("create calendar event should not create tomorrow", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "contacts approval rejection",
+            toolName: "contacts_lookup",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await ContactsTool().execute(
+                request: request("find contact Nobody", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "weather approval rejection",
+            toolName: "weather_lookup",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await WeatherTool().execute(
+                request: request("weather in Montreal", false, true),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "current location approval rejection",
+            toolName: "current_location",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await CurrentLocationTool().execute(
+                request: request("where am I", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "MapKit approval rejection",
+            toolName: "maps_lookup",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await MapsTool().execute(
+                request: request("map Apple Park", false, true),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "WebKit approval rejection",
+            toolName: "integrated_webview",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await WebViewTool().execute(
+                request: request("open webview https://example.com", false, true),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "web fetch approval rejection",
+            toolName: "web_fetch",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await WebFetchTool().execute(
+                request: request("fetch https://example.com", false, true),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "local file approval rejection",
+            toolName: "local_file",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await LocalFileTool().execute(
+                request: request("write file rejected.txt content should not write", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "memory delete approval rejection",
+            toolName: "memory_delete",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await MemoryDeleteTool(memoryService: MemoryService()).execute(
+                request: request("delete memory should not delete", false, false),
+                context: context
+            )
+        }
+
+        await recordApprovalRejection(
+            label: "remote HTTP approval rejection",
+            toolName: "remote_network",
+            recordSynthetic: recordSynthetic
+        ) {
+            try await RemoteNetworkTool().execute(
+                request: request("POST https://example.com body should-not-send", false, true),
+                context: context
+            )
+        }
+
+        do {
+            let result = try await WeatherTool().execute(request: request("weather in Montreal", true, false), context: context)
+            record("weather network-off block", result) { $0.errorCategory == "network_disabled" }
+        } catch { recordError("weather network-off block", "weather_lookup", error) }
+
+        do {
+            let result = try await MapsTool().execute(request: request("map Apple Park", true, false), context: context)
+            record("MapKit network-off block", result) { $0.errorCategory == "network_disabled" }
+        } catch { recordError("MapKit network-off block", "maps_lookup", error) }
+
+        do {
+            let result = try await WebViewTool().execute(request: request("open webview https://example.com", true, false), context: context)
+            record("WebKit network-off block", result) { $0.errorCategory == "network_disabled" }
+        } catch { recordError("WebKit network-off block", "integrated_webview", error) }
+
+        do {
+            let result = try await WebFetchTool().execute(request: request("fetch https://example.com", true, false), context: context)
+            record("web fetch network-off block", result) { $0.errorCategory == "network_disabled" }
+        } catch { recordError("web fetch network-off block", "web_fetch", error) }
+
+        do {
+            let result = try await RemoteNetworkTool().execute(request: request("GET https://example.com", true, false), context: context)
+            record("remote HTTP network-off block", result) { $0.errorCategory == "network_disabled" }
+        } catch { recordError("remote HTTP network-off block", "remote_network", error) }
+
+        do {
+            let result = try await TextMessageTool().execute(request: request("text no-number hello", true, false), context: context)
+            record("SMS invalid input", result) { $0.output.contains("Provide a phone number") }
+        } catch { recordError("SMS invalid input", "text_message", error) }
+
+        do {
+            let result = try await PhoneCallTool().execute(request: request("call nobody", true, false), context: context)
+            record("phone invalid input", result) { $0.output.contains("Provide a phone number") }
+        } catch { recordError("phone invalid input", "phone_call", error) }
+
+        do {
+            let result = try await EmailTool().execute(request: request("email not-an-address hello", true, false), context: context)
+            record("email invalid input", result) { $0.output.contains("Provide an email address") }
+        } catch { recordError("email invalid input", "email_compose", error) }
+
+        do {
+            let result = try await MapsTool().execute(request: request("map", true, true), context: context)
+            record("MapKit invalid query", result) { $0.errorCategory == "invalid_arguments" }
+        } catch { recordError("MapKit invalid query", "maps_lookup", error) }
+
+        do {
+            let result = try await WebViewTool().execute(request: request("open webview file:///etc/passwd", true, true), context: context)
+            record("WebKit unsafe scheme block", result) { $0.output.contains("http or https URL") }
+        } catch { recordError("WebKit unsafe scheme block", "integrated_webview", error) }
+
+        do {
+            let result = try await RemoteNetworkTool().execute(request: request("GET ftp://example.com/file", true, true), context: context)
+            record("remote HTTP invalid URL", result) { $0.output.contains("HTTP or HTTPS URL") }
+        } catch { recordError("remote HTTP invalid URL", "remote_network", error) }
+    }
+
+    @MainActor
+    private static func recordApprovalRejection(
+        label: String,
+        toolName: String,
+        recordSynthetic: (String, String, Bool, String, String?, Int?, String?) -> Void,
+        operation: () async throws -> ToolResult
+    ) async {
+        do {
+            let result = try await operation()
+            recordSynthetic(label, toolName, false, "Tool executed unexpectedly: \(result.output)", result.target, result.statusCode, "approval_not_enforced")
+        } catch AgentRuntimeError.approvalRequired(let rejectedToolName) {
+            recordSynthetic(
+                label,
+                toolName,
+                rejectedToolName == toolName,
+                "Approval was required before \(rejectedToolName) executed.",
+                nil,
+                nil,
+                "approval_required"
+            )
+        } catch {
+            recordSynthetic(label, toolName, false, error.localizedDescription, nil, nil, "unexpected_error")
+        }
+    }
+
+    private static func appendExtractionAndRedactionE2E(
+        recordSynthetic: (String, String, Bool, String, String?, Int?, String?) -> Void
+    ) {
+        let html = """
+        <!doctype html>
+        <html>
+        <head>
+        <title>monGARS HTML Probe</title>
+        <meta name="description" content="diagnostic description">
+        <link rel="canonical" href="https://example.com/diagnostic">
+        <style>.hidden { display: none; }</style>
+        <script>window.secret = 'nope';</script>
+        </head>
+        <body><nav>Navigation should disappear</nav><main><h1>Readable heading</h1><p>Useful readable body.</p></main></body>
+        </html>
+        """
+        let extracted = WebContentExtractor.extractHTML(html)
+        recordSynthetic(
+            "HTML extraction local",
+            "web_content_extractor",
+            extracted.title == "monGARS HTML Probe"
+                && extracted.metaDescription == "diagnostic description"
+                && extracted.canonicalURL == "https://example.com/diagnostic"
+                && extracted.readableText.contains("Useful readable body")
+                && !extracted.readableText.contains("window.secret"),
+            extracted.preview(limit: 240),
+            nil,
+            nil,
+            nil
+        )
+
+        let jsonPreview = WebContentExtractor.extractPlainText(#"{"status":"ok","message":"monGARS JSON probe"}"#, limit: 80)
+        recordSynthetic(
+            "plain text JSON preview local",
+            "web_content_extractor",
+            jsonPreview.contains("monGARS JSON probe"),
+            jsonPreview,
+            nil,
+            nil,
+            nil
+        )
+
+        #if canImport(PDFKit)
+        if let data = DiagnosticPDFFactory.makeSelectablePDFData(text: "monGARS PDF extraction probe") {
+            do {
+                let extraction = try PDFTextExtractor.extract(data: data)
+                recordSynthetic(
+                    "PDFKit extraction local",
+                    "pdf_text_extractor",
+                    extraction.text.contains("Page 1") && extraction.text.contains("monGARS PDF extraction probe"),
+                    extraction.text,
+                    nil,
+                    nil,
+                    nil
+                )
+            } catch {
+                recordSynthetic("PDFKit extraction local", "pdf_text_extractor", false, error.localizedDescription, nil, nil, "pdf_extraction_failed")
+            }
+        } else {
+            recordSynthetic("PDFKit extraction local", "pdf_text_extractor", false, "Could not generate diagnostic PDF data.", nil, nil, "pdf_generation_unavailable")
+        }
+        #else
+        recordSynthetic("PDFKit extraction local", "pdf_text_extractor", false, "PDFKit is unavailable.", nil, nil, "platform_unavailable")
+        #endif
+
+        let rawSensitive = """
+        Build: 202606280905
+        Current location: 46.00604, -73.16488
+        Prepared approved SMS handoff: sms:15551234567&body=secret body.
+        Authorization: Bearer hidden-token
+        """
+        let redacted = DiagnosticsRedactor.redact(rawSensitive, maxLength: 1_000)
+        recordSynthetic(
+            "diagnostics redaction self-check",
+            "diagnostics_redactor",
+            redacted.contains("202606280905")
+                && redacted.contains("46.00604, -73.16488")
+                && !redacted.contains("15551234567")
+                && !redacted.contains("secret body")
+                && !redacted.contains("hidden-token"),
+            redacted,
+            nil,
+            nil,
+            nil
+        )
+    }
+
     private static func appendConfigurationSection(settings: SettingsStore, to builder: inout ReportBuilder) {
         let remoteEndpointURL = URL(string: settings.remoteEndpoint)
         let weatherEndpointURL = URL(string: settings.weatherEndpoint)
@@ -440,9 +836,14 @@ enum DeveloperDiagnosticsRunner {
         builder.add("- WebKit: unavailable")
         #endif
         #if canImport(PDFKit)
-        let pdfStatus = PDFDocument(data: Data("%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF".utf8)) == nil
-            ? "available; sample probe did not open"
-            : "available"
+        let pdfStatus: String
+        if let data = DiagnosticPDFFactory.makeSelectablePDFData(text: "monGARS PDFKit framework probe"),
+           let extraction = try? PDFTextExtractor.extract(data: data),
+           extraction.text.contains("monGARS PDFKit framework probe") {
+            pdfStatus = "available; text extraction probe passed"
+        } else {
+            pdfStatus = "available; text extraction probe failed"
+        }
         builder.add("- PDFKit: \(pdfStatus)")
         #else
         builder.add("- PDFKit: unavailable")

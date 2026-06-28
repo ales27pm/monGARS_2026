@@ -41,7 +41,7 @@ xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platfor
 
 On this machine, `build-for-testing` and `test-without-building` succeeded against the explicit `monGARS Test iPhone` simulator. The latest full simulator run passed 48 Swift Testing tests after the native-tools pass.
 
-For slow or unreliable simulator launch cycles, use Settings > Developer > `Run Real Tool E2E & Export Report` on-device or in an already-running app. This invokes production tool implementations directly without `MockLLMProvider`, honors the network toggle, and provides a redacted runtime report for tool probes, network policy, Keychain, framework availability, permissions, SwiftData counts, and recent diagnostics. It is complementary evidence, not a replacement for `xcodebuild` compilation.
+For slow or intentionally skipped simulator launch cycles, use Settings > Developer > `Run Full Real Tool E2E & Export Report` on-device or in an already-running app. This invokes production tool implementations directly without `MockLLMProvider`, honors the network toggle, verifies every registered tool has a probe, and reports approval rejection gates, network-off gates, private-host policy, extraction/import checks, Keychain, framework availability, permissions, SwiftData counts, and recent diagnostics. It is complementary evidence, not a replacement for non-launching `xcodebuild` compilation.
 
 ## Current Known Gaps
 

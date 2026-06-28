@@ -2,9 +2,12 @@
 
 Use a real device for permission and handoff checks where possible. Keep Settings > Network off for the first pass.
 
-## Developer Real Tool E2E Report
+## Developer Full Real Tool E2E Report
 
-- Open Settings > Developer and tap `Run Real Tool E2E & Export Report`. Expected: report is generated under app-owned `AgentFiles/Reports`, can be shared, and includes app/build metadata, network policy, Keychain, framework availability, permission states, SwiftData counts, recent diagnostics, and direct production-tool E2E probes.
+- Open Settings > Developer and tap `Run Full Real Tool E2E & Export Report`. Expected: report is generated under app-owned `AgentFiles/Reports`, can be shared, and includes app/build metadata, network policy, Keychain, framework availability, permission states, SwiftData counts, recent diagnostics, and direct production-tool E2E probes.
+- Inspect Real Tool E2E. Expected: `Tool coverage: 24/24 registry tools`, no `Missing registry tool probes`, and no `FAIL` lines.
+- Confirm negative-path probes are present. Expected: approval rejection, network-off blocks, invalid input handling, unsafe web scheme block, private-host block, and diagnostics redaction self-check are all `PASS`.
+- Confirm local extraction/import probes are present. Expected: HTML extraction, plain text/JSON preview, PDFKit extraction, and PDF document import/search are all `PASS`.
 - Inspect the report. Expected: no API keys, tokens, email addresses, phone numbers, SMS/email bodies, or contact dumps appear in clear text.
 - Confirm the report states that no `MockLLMProvider` is used and that in-app E2E is not XCTest execution. Expected: Xcode build/test evidence remains separate.
 
