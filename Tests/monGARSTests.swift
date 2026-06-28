@@ -1194,6 +1194,25 @@ struct MonGARSTests {
         #expect(redacted.contains("[TRUNCATED]"))
     }
 
+    @Test func diagnosticsRedactionPreservesReportIdentifiersAndCoordinates() throws {
+        let raw = """
+        Generated: 2026-06-28T07:36:35Z
+        Build: 202606280328
+        Delivery UUID: 2d684a6f-5843-4145-93d4-6916f131f9ab
+        Coordinate: 45.50170, -73.56730
+        Phone: +1 (555) 123-4567
+        """
+
+        let redacted = DiagnosticsRedactor.redact(raw, maxLength: 1_000)
+
+        #expect(redacted.contains("2026-06-28T07:36:35Z"))
+        #expect(redacted.contains("202606280328"))
+        #expect(redacted.contains("2d684a6f-5843-4145-93d4-6916f131f9ab"))
+        #expect(redacted.contains("45.50170, -73.56730"))
+        #expect(!redacted.contains("+1 (555) 123-4567"))
+        #expect(redacted.contains("[PHONE REDACTED]"))
+    }
+
     @Test func developerDiagnosticsReportCoversRuntimeChecksAndRedactsSecrets() async throws {
         let (container, context) = makeContext()
         container.settingsStore.remoteProviderEnabled = false
@@ -1225,6 +1244,8 @@ struct MonGARSTests {
         #expect(result.text.contains("SwiftData Counts"))
         #expect(result.text.contains("Recent Diagnostics"))
         #expect(result.text.contains("Localhost policy: blocked"))
+        #expect(result.text.contains("default private host policy"))
+        #expect(!result.text.contains("- FAIL "))
         #expect(result.text.contains("Remote API key configured: true"))
         #expect(result.text.contains("Weather API key configured: true"))
         #expect(!result.text.contains("super-secret-remote-key"))

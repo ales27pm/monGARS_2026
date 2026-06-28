@@ -155,11 +155,12 @@ enum DeveloperDiagnosticsRunner {
         } catch { recordError("memory save/lookup/delete", toolName: "memory", error: error) }
 
         do {
-            let document = DocumentRecord(title: "\(marker).md", content: "\(marker) document retrieval text for real tool E2E.")
+            let documentQuery = "\(marker) document retrieval text"
+            let document = DocumentRecord(title: "\(marker).md", content: "\(documentQuery) for real tool E2E.")
             context.insert(document)
             try container.documentService.rebuildChunks(for: document, context: context)
-            let search = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved("document \(marker)"), context: context)
-            record("document search", search) { $0.output.contains(marker) }
+            let search = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(documentQuery), context: context)
+            record("document search", search) { $0.output.contains(document.title) && $0.output.contains(marker) }
             let summary = try await DocumentSummaryTool(documentService: container.documentService).execute(request: approved("summarize my imported document"), context: context)
             record("document summary", summary) { !$0.output.contains("No documents") }
             try container.documentService.delete(document, context: context)
@@ -203,7 +204,13 @@ enum DeveloperDiagnosticsRunner {
 
         await appendHandoffE2E(context: context, request: approved, record: record, recordError: recordError)
         await appendAppleDataE2E(context: context, request: approved, record: record, recordError: recordError, marker: marker)
-        await appendNetworkE2E(context: context, request: approved, record: record, recordError: recordError)
+        await appendNetworkE2E(
+            context: context,
+            developerModeEnabled: container.settingsStore.developerModeEnabled,
+            request: approved,
+            record: record,
+            recordError: recordError
+        )
 
         let passed = results.filter(\.passed).count
         builder.add("- Summary: \(passed)/\(results.count) probes passed")
@@ -288,6 +295,7 @@ enum DeveloperDiagnosticsRunner {
     @MainActor
     private static func appendNetworkE2E(
         context: ModelContext,
+        developerModeEnabled: Bool,
         request: (String, Bool) -> ToolExecutionRequest,
         record: (String, ToolResult, (ToolResult) -> Bool) -> Void,
         recordError: (String, String, Error) -> Void
@@ -339,15 +347,47 @@ enum DeveloperDiagnosticsRunner {
         } catch { recordError("generic remote HTTP", "remote_network", error) }
 
         do {
-            let result = try await WebFetchTool().execute(request: request("fetch http://127.0.0.1:9", true), context: context)
-            record("private host block", result) {
-                $0.output.contains("Network tools are disabled") || $0.errorCategory == "blocked_host"
-            }
-        } catch NetworkClientError.blockedHost {
-            record("private host block", ToolResult(toolName: "web_fetch", output: "Blocked private host", riskLevel: .high, requiresApproval: true, approved: true, errorCategory: "blocked_host")) {
+            try NetworkPolicy(allowsLocalNetworkHosts: false).validate(URL(string: "http://127.0.0.1:9")!)
+            record("default private host policy", ToolResult(toolName: "network_policy", output: "Default policy allowed localhost unexpectedly.", riskLevel: .high, requiresApproval: false, approved: true, errorCategory: "policy_failed")) {
                 $0.errorCategory == "blocked_host"
             }
-        } catch { recordError("private host block", "web_fetch", error) }
+        } catch NetworkClientError.blockedHost(let host) {
+            record("default private host policy", ToolResult(toolName: "network_policy", output: "Default policy blocked private host: \(host)", riskLevel: .high, requiresApproval: false, approved: true, target: host, errorCategory: "blocked_host")) {
+                $0.errorCategory == "blocked_host"
+            }
+        } catch { recordError("default private host policy", "network_policy", error) }
+
+        let privateHostLabel = developerModeEnabled ? "private host developer-mode path" : "private host block"
+        do {
+            let result = try await WebFetchTool().execute(request: request("fetch http://127.0.0.1:9", true), context: context)
+            record(privateHostLabel, result) {
+                if developerModeEnabled {
+                    return $0.errorCategory != "blocked_host"
+                }
+                return $0.output.contains("Network tools are disabled") || $0.errorCategory == "blocked_host"
+            }
+        } catch NetworkClientError.blockedHost {
+            record(privateHostLabel, ToolResult(toolName: "web_fetch", output: "Blocked private host", riskLevel: .high, requiresApproval: true, approved: true, errorCategory: "blocked_host")) {
+                !developerModeEnabled && $0.errorCategory == "blocked_host"
+            }
+        } catch {
+            if developerModeEnabled {
+                let nsError = error as NSError
+                record(privateHostLabel, ToolResult(
+                    toolName: "web_fetch",
+                    output: "Developer Mode allowed the private-host request; connection failed because no local service was listening: \(error.localizedDescription)",
+                    riskLevel: .high,
+                    requiresApproval: true,
+                    approved: true,
+                    target: "127.0.0.1",
+                    errorCategory: nsError.domain == NSURLErrorDomain ? "connection_unavailable" : "thrown_error"
+                )) {
+                    $0.errorCategory != "blocked_host"
+                }
+            } else {
+                recordError(privateHostLabel, "web_fetch", error)
+            }
+        }
     }
 
     private static func appendConfigurationSection(settings: SettingsStore, to builder: inout ReportBuilder) {

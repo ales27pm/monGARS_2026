@@ -24,11 +24,7 @@ enum DiagnosticsRedactor {
             with: "[EMAIL REDACTED]",
             options: [.regularExpression, .caseInsensitive]
         )
-        redacted = redacted.replacingOccurrences(
-            of: #"\+?[0-9][0-9\s\-\(\)\.]{6,}[0-9]"#,
-            with: "[PHONE REDACTED]",
-            options: .regularExpression
-        )
+        redacted = redactPhoneNumbers(in: redacted)
 
         let trimmed = redacted.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > maxLength else { return trimmed }
@@ -44,6 +40,19 @@ enum DiagnosticsRedactor {
         text.replacingOccurrences(
             of: "(?i)([?&]\(NSRegularExpression.escapedPattern(for: name))=)([^&\\s]+)",
             with: "$1[REDACTED]",
+            options: .regularExpression
+        )
+    }
+
+    private static func redactPhoneNumbers(in text: String) -> String {
+        let plusPrefixed = text.replacingOccurrences(
+            of: #"(?<![\w-])\+\d{7,15}(?![\w-])"#,
+            with: "[PHONE REDACTED]",
+            options: .regularExpression
+        )
+        return plusPrefixed.replacingOccurrences(
+            of: #"(?<![\w-])\+?\d(?=[\d\s\-\(\)\.]*[\s\-\(\)\.])[\d\s\-\(\)\.]{6,}\d(?![\w-])"#,
+            with: "[PHONE REDACTED]",
             options: .regularExpression
         )
     }
