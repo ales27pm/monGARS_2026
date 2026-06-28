@@ -89,8 +89,8 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 
 ## Remaining Limitations
 
-- Full XCTest execution is currently blocked by local CoreSimulator/Xcode test-runner instability; focused runtime tests can pass.
-- Signed archive export/upload has not been run from this checkout.
+- Full XCTest execution currently passes on the `monGARS Test iPhone` simulator when run without rebuilding after `build-for-testing`.
+- Signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`.
 - Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
 - Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
 - Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.

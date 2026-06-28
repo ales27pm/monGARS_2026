@@ -42,6 +42,6 @@ On this machine, the generic iPhoneOS arm64 build and unsigned Release archive s
 ## Current Known Gaps
 
 - Full XCTest execution needs a healthier CoreSimulator/Xcode test-runner path; focused simulator tests can pass.
-- Signed archive export/upload remains to be run before an actual TestFlight submission.
+- Signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`.
 - Document summarization is deterministic and based on imported text excerpts, not semantic embeddings.
 - Network-capable tools remain disabled until Settings enables network provider and tools, even after approval.
