@@ -20,27 +20,8 @@ struct GoalsView: View {
 
             Section("Approvals") {
                 ForEach(approvals.filter { $0.approved == nil }) { approval in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(approval.actionName)
-                            .font(.headline)
-                        Text(approval.reason)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Button {
-                                resolve(approval, approved: true)
-                            } label: {
-                                Label("Approve", systemImage: "checkmark.circle")
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button(role: .destructive) {
-                                resolve(approval, approved: false)
-                            } label: {
-                                Label("Reject", systemImage: "xmark.circle")
-                            }
-                            .buttonStyle(.bordered)
-                        }
+                    ApprovalCard(approval: approval) { approved in
+                        resolve(approval, approved: approved)
                     }
                 }
             }
@@ -117,6 +98,10 @@ struct GoalsView: View {
 
     private func resolve(_ approval: ApprovalRequestRecord, approved: Bool) {
         do {
+            guard !approved || !approval.isExpired() else {
+                errorMessage = "Approval expired. Restart the run so monGARS can generate a fresh approval tuple."
+                return
+            }
             if approved {
                 try container.agentRuntime.approve(approval, context: modelContext)
             } else {
@@ -156,6 +141,72 @@ struct GoalsView: View {
             try container.agentRuntime.cancel(run: run, context: modelContext)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct ApprovalCard: View {
+    let approval: ApprovalRequestRecord
+    let resolve: (Bool) -> Void
+
+    private var expired: Bool { approval.isExpired() }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(approval.toolName, systemImage: expired ? "exclamationmark.triangle.fill" : "shield.lefthalf.filled")
+                    .font(.headline)
+                Spacer()
+                Text(approval.riskLevelRawValue.uppercased())
+                    .font(.caption2.bold())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(expired ? Color.red.opacity(0.16) : Color.orange.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+
+            Text(approval.userVisibleDiff)
+                .font(.caption)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                metadataRow("Target", approval.target ?? "local")
+                metadataRow("Payload", String(approval.payloadHash.prefix(12)) + "…")
+                metadataRow("Session", String(approval.sessionID.uuidString.prefix(8)))
+                metadataRow("Expires", expired ? "expired" : approval.expiresAt.formatted(date: .omitted, time: .shortened))
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+            Text(approval.reason)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+
+            HStack {
+                Button {
+                    resolve(true)
+                } label: {
+                    Label("Approve", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(expired)
+
+                Button(role: .destructive) {
+                    resolve(false)
+                } label: {
+                    Label("Reject", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func metadataRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+            Text(value)
+                .textSelection(.enabled)
         }
     }
 }
