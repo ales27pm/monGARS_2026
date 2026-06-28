@@ -65,7 +65,7 @@ struct AgentGraph: Sendable {
 
     func run(input: String, messages: [String], context: AgentExecutionContext) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            Task { @MainActor in
                 do {
                     var state = AgentState(userInput: input, messages: messages, currentNodeID: startNodeID)
                     while let node = nodes[state.currentNodeID] {
@@ -137,18 +137,18 @@ struct AgentGraph: Sendable {
         let respond = AgentNode(id: "respond") { state, execution in
             var next = state
             if let toolOutput = state.toolOutput {
-                next.finalResponse = toolOutput
+                next.finalResponse = UserFacingResponseSanitizer.sanitize(toolOutput)
             } else {
                 let request = LLMRequest(prompt: state.userInput, conversationContext: state.messages, retrievedContext: state.retrievedContext)
                 var accumulated = ""
                 for try await chunk in execution.llmProvider.stream(request: request) {
                     accumulated += chunk
-                    await execution.event(.partialResponse(accumulated))
+                    await execution.event(.partialResponse(UserFacingResponseSanitizer.sanitize(accumulated)))
                 }
-                next.finalResponse = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+                next.finalResponse = UserFacingResponseSanitizer.sanitize(accumulated)
                 if next.finalResponse.isEmpty {
                     let response = try await execution.llmProvider.complete(request: request)
-                    next.finalResponse = response.text
+                    next.finalResponse = UserFacingResponseSanitizer.sanitize(response.text)
                 }
             }
             return next
@@ -208,11 +208,11 @@ struct AgentGraph: Sendable {
         let respond = simpleNode("Respond") { state, execution in
             var next = state
             if let toolOutput = state.toolOutput {
-                next.finalResponse = toolOutput
+                next.finalResponse = UserFacingResponseSanitizer.sanitize(toolOutput)
             } else {
                 let request = LLMRequest(prompt: state.userInput, conversationContext: state.messages, retrievedContext: state.retrievedContext)
                 let response = try await execution.llmProvider.complete(request: request)
-                next.finalResponse = response.text
+                next.finalResponse = UserFacingResponseSanitizer.sanitize(response.text)
             }
             return next
         }

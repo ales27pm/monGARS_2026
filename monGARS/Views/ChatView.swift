@@ -255,7 +255,7 @@ struct ChatView: View {
         conversation.messages.append(assistant)
         try? modelContext.save()
 
-        Task {
+        Task { @MainActor in
             do {
                 let history = conversation.messages.map { "\($0.role.rawValue): \($0.content)" }
                 let options = AgentRuntimeOptions(
@@ -266,57 +266,51 @@ struct ChatView: View {
                 )
 
                 for try await event in container.agentRuntime.run(goal: text, conversationID: conversation.id, messages: history, provider: container.llmProvider(), options: options, context: modelContext) {
-                    await MainActor.run {
-                        switch event {
-                        case .status(let runID, let phase, let message):
-                            currentRunID = runID
-                            assistant.agentRunID = runID
-                            assistant.statusText = phase.statusText
-                            statusMessage = message
-                            container.diagnostics.graphSteps.append(phase.rawValue)
-                        case .trace(_, let phase, let message):
-                            container.diagnostics.graphSteps.append("\(phase.rawValue): \(message)")
-                        case .partialResponse(let runID, let partial):
-                            currentRunID = runID
-                            assistant.agentRunID = runID
-                            assistant.content = partial
-                        case .approvalRequired(let runID, let approvalID, let toolName, let reason):
-                            currentRunID = runID
-                            assistant.agentRunID = runID
-                            assistant.statusText = "Approval required"
-                            assistant.content = "I need approval before running \(toolName): \(reason)"
-                            pendingApprovals[assistant.id] = PendingApproval(id: approvalID, runID: runID, toolName: toolName, reason: reason)
-                            statusMessage = "Approval required for \(toolName)."
-                        case .completed(let runID, let response):
-                            currentRunID = runID
-                            assistant.agentRunID = runID
-                            assistant.statusText = "Done"
-                            assistant.content = response
-                            if let action = ToolHandoffAction.actions(from: response).first(where: { $0.destination == .integratedWebView }) {
-                                webViewRequest = IntegratedWebViewRequest(url: action.url)
-                            }
-                            pendingApprovals.removeValue(forKey: assistant.id)
-                            statusMessage = nil
+                    switch event {
+                    case .status(let runID, let phase, let message):
+                        currentRunID = runID
+                        assistant.agentRunID = runID
+                        assistant.statusText = phase.statusText
+                        statusMessage = message
+                        container.diagnostics.graphSteps.append(phase.rawValue)
+                    case .trace(_, let phase, let message):
+                        container.diagnostics.graphSteps.append("\(phase.rawValue): \(message)")
+                    case .partialResponse(let runID, let partial):
+                        currentRunID = runID
+                        assistant.agentRunID = runID
+                        assistant.content = partial
+                    case .approvalRequired(let runID, let approvalID, let toolName, let reason):
+                        currentRunID = runID
+                        assistant.agentRunID = runID
+                        assistant.statusText = "Approval required"
+                        assistant.content = "I need approval before running \(toolName): \(reason)"
+                        pendingApprovals[assistant.id] = PendingApproval(id: approvalID, runID: runID, toolName: toolName, reason: reason)
+                        statusMessage = "Approval required for \(toolName)."
+                    case .completed(let runID, let response):
+                        currentRunID = runID
+                        assistant.agentRunID = runID
+                        assistant.statusText = "Done"
+                        assistant.content = response
+                        if let action = ToolHandoffAction.actions(from: response).first(where: { $0.destination == .integratedWebView }) {
+                            webViewRequest = IntegratedWebViewRequest(url: action.url)
                         }
+                        pendingApprovals.removeValue(forKey: assistant.id)
+                        statusMessage = nil
                     }
                 }
 
-                await MainActor.run {
-                    conversation.updatedAt = .now
-                    try? modelContext.save()
-                    isRunning = false
-                    currentRunID = nil
-                    pendingApprovals.removeValue(forKey: assistant.id)
-                }
+                conversation.updatedAt = .now
+                try? modelContext.save()
+                isRunning = false
+                currentRunID = nil
+                pendingApprovals.removeValue(forKey: assistant.id)
             } catch {
-                await MainActor.run {
-                    assistant.content = "I hit an error: \(error.localizedDescription)"
-                    container.diagnostics.lastError = error.localizedDescription
-                    errorMessage = error.localizedDescription
-                    isRunning = false
-                    currentRunID = nil
-                    pendingApprovals.removeValue(forKey: assistant.id)
-                }
+                assistant.content = "I hit an error: \(error.localizedDescription)"
+                container.diagnostics.lastError = error.localizedDescription
+                errorMessage = error.localizedDescription
+                isRunning = false
+                currentRunID = nil
+                pendingApprovals.removeValue(forKey: assistant.id)
             }
         }
     }

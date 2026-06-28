@@ -20,12 +20,15 @@ struct WeatherReport: Sendable, Equatable {
     var target: String
     var statusCode: Int?
     var latencyMs: Double
+    var forecastSummary: String?
 }
 
 protocol WeatherService: Sendable {
     func currentWeather(for location: String) async throws -> WeatherReport
+    func forecastWeather(for location: String, dayOffset: Int) async throws -> WeatherReport
     #if canImport(CoreLocation)
     func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport
+    func forecastWeather(at location: CLLocation, locationName: String, dayOffset: Int) async throws -> WeatherReport
     #endif
 }
 
@@ -34,6 +37,7 @@ enum WeatherServiceError: LocalizedError, Equatable {
     case invalidEndpoint
     case weatherKitUnavailable(String)
     case geocodingFailed(String)
+    case forecastUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -45,6 +49,8 @@ enum WeatherServiceError: LocalizedError, Equatable {
             "WeatherKit is unavailable: \(reason)"
         case .geocodingFailed(let location):
             "Could not geocode weather location: \(location)."
+        case .forecastUnavailable(let reason):
+            "Weather forecast is unavailable: \(reason)"
         }
     }
 }
@@ -83,6 +89,24 @@ struct CompositeWeatherService: WeatherService {
         return try await fallback.currentWeather(for: location)
     }
 
+    func forecastWeather(for location: String, dayOffset: Int) async throws -> WeatherReport {
+        if let primary {
+            do {
+                return try await primary.forecastWeather(for: location, dayOffset: dayOffset)
+            } catch WeatherServiceError.weatherKitUnavailable {
+                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+            } catch WeatherServiceError.forecastUnavailable {
+                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+            } catch {
+                if AppNetworkConfiguration.weatherAPIKey.isEmpty {
+                    throw error
+                }
+                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+            }
+        }
+        return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+    }
+
     #if canImport(CoreLocation)
     func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport {
         if let primary {
@@ -98,6 +122,24 @@ struct CompositeWeatherService: WeatherService {
             }
         }
         return try await fallback.currentWeather(at: location, locationName: locationName)
+    }
+
+    func forecastWeather(at location: CLLocation, locationName: String, dayOffset: Int) async throws -> WeatherReport {
+        if let primary {
+            do {
+                return try await primary.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+            } catch WeatherServiceError.weatherKitUnavailable {
+                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+            } catch WeatherServiceError.forecastUnavailable {
+                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+            } catch {
+                if AppNetworkConfiguration.weatherAPIKey.isEmpty {
+                    throw error
+                }
+                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+            }
+        }
+        return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
     }
     #endif
 }
@@ -115,6 +157,23 @@ struct WeatherKitWeatherService: WeatherService {
             throw WeatherServiceError.geocodingFailed(location)
         }
         return try await currentWeather(at: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), locationName: placemarks.first?.locality ?? placemarks.first?.name ?? location)
+        #else
+        throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
+        #endif
+    }
+
+    func forecastWeather(for location: String, dayOffset: Int) async throws -> WeatherReport {
+        #if canImport(WeatherKit) && canImport(CoreLocation)
+        let placemarks: [CLPlacemark]
+        do {
+            placemarks = try await CLGeocoder().geocodeAddressString(location)
+        } catch {
+            throw WeatherServiceError.geocodingFailed(location)
+        }
+        guard let coordinate = placemarks.first?.location?.coordinate else {
+            throw WeatherServiceError.geocodingFailed(location)
+        }
+        return try await forecastWeather(at: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), locationName: placemarks.first?.locality ?? placemarks.first?.name ?? location, dayOffset: dayOffset)
         #else
         throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
         #endif
@@ -141,8 +200,53 @@ struct WeatherKitWeatherService: WeatherService {
                 provider: "WeatherKit",
                 target: "weatherkit.apple.com",
                 statusCode: nil,
-                latencyMs: latency
+                latencyMs: latency,
+                forecastSummary: nil
             )
+        } catch {
+            throw WeatherServiceError.weatherKitUnavailable(error.localizedDescription)
+        }
+        #else
+        throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
+        #endif
+    }
+
+    func forecastWeather(at location: CLLocation, locationName: String, dayOffset: Int) async throws -> WeatherReport {
+        #if canImport(WeatherKit)
+        let started = ContinuousClock.now
+        do {
+            let weather = try await WeatherKit.WeatherService.shared.weather(for: location)
+            let current = weather.currentWeather
+            let targetDate = Calendar.current.date(byAdding: .day, value: dayOffset, to: Date()) ?? Date()
+            let day = weather.dailyForecast.forecast.first { Calendar.current.isDate($0.date, inSameDayAs: targetDate) }
+                ?? weather.dailyForecast.forecast.dropFirst(max(0, dayOffset)).first
+            guard let day else {
+                throw WeatherServiceError.forecastUnavailable("WeatherKit returned no daily forecast for that date.")
+            }
+
+            let temperature = current.temperature.converted(to: UnitTemperature.celsius).value
+            let windSpeed = current.wind.speed.converted(to: UnitSpeed.metersPerSecond).value
+            let high = day.highTemperature.converted(to: UnitTemperature.celsius).value
+            let low = day.lowTemperature.converted(to: UnitTemperature.celsius).value
+            let precipitation = Int((day.precipitationChance * 100).rounded())
+            let label = dayOffset == 1 ? "Tomorrow" : DateFormatter.localizedString(from: day.date, dateStyle: .medium, timeStyle: .none)
+            let latency = Self.latencyMilliseconds(started.duration(to: ContinuousClock.now))
+            return WeatherReport(
+                locationName: locationName,
+                condition: current.condition.description,
+                temperature: temperature,
+                temperatureUnit: "C",
+                humidityPercent: Int((current.humidity * 100).rounded()),
+                windSpeed: windSpeed,
+                windUnit: "m/s",
+                provider: "WeatherKit",
+                target: "weatherkit.apple.com",
+                statusCode: nil,
+                latencyMs: latency,
+                forecastSummary: "\(label): \(day.condition.description), high \(Int(high.rounded()))°C, low \(Int(low.rounded()))°C, precipitation \(precipitation)%"
+            )
+        } catch let error as WeatherServiceError {
+            throw error
         } catch {
             throw WeatherServiceError.weatherKitUnavailable(error.localizedDescription)
         }
@@ -193,8 +297,13 @@ struct OpenWeatherCompatibleWeatherService: WeatherService {
             provider: "OpenWeather-compatible",
             target: response.finalURL.host ?? response.finalURL.absoluteString,
             statusCode: response.statusCode,
-            latencyMs: response.latencyMs
+            latencyMs: response.latencyMs,
+            forecastSummary: nil
         )
+    }
+
+    func forecastWeather(for location: String, dayOffset: Int) async throws -> WeatherReport {
+        throw WeatherServiceError.forecastUnavailable("The configured OpenWeather-compatible current-weather endpoint does not provide daily forecast data.")
     }
 
     #if canImport(CoreLocation)
@@ -229,8 +338,13 @@ struct OpenWeatherCompatibleWeatherService: WeatherService {
             provider: "OpenWeather-compatible",
             target: response.finalURL.host ?? response.finalURL.absoluteString,
             statusCode: response.statusCode,
-            latencyMs: response.latencyMs
+            latencyMs: response.latencyMs,
+            forecastSummary: nil
         )
+    }
+
+    func forecastWeather(at location: CLLocation, locationName: String, dayOffset: Int) async throws -> WeatherReport {
+        throw WeatherServiceError.forecastUnavailable("The configured OpenWeather-compatible current-weather endpoint does not provide daily forecast data.")
     }
     #endif
 

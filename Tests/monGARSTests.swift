@@ -8,8 +8,6 @@ import UIKit
 #endif
 
 final class TestURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
-
     override class func canInit(with request: URLRequest) -> Bool {
         true
     }
@@ -19,19 +17,41 @@ final class TestURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        guard let handler = Self.handler else {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+
+        let statusCode: Int
+        let contentType: String
+        let data: Data
+        switch url.path {
+        case "/status":
+            statusCode = 200
+            contentType = "application/json"
+            data = Data(#"{"ok":true}"#.utf8)
+        case "/down":
+            statusCode = 503
+            contentType = "application/json"
+            data = Data()
+        case "/stream":
+            statusCode = 200
+            contentType = "text/event-stream"
+            data = Data("data: one\n\ndata: two\n".utf8)
+        default:
+            statusCode = 404
+            contentType = "application/json"
+            data = Data()
+        }
+
+        guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": contentType]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
 
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {}
@@ -132,15 +152,6 @@ struct MonGARSTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TestURLProtocol.self]
         let session = URLSession(configuration: configuration)
-        TestURLProtocol.handler = { request in
-            let response = HTTPURLResponse(
-                url: try #require(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "application/json"]
-            )
-            return (try #require(response), Data(#"{"ok":true}"#.utf8))
-        }
 
         let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
         let response = try await client.send(NetworkRequest(url: try #require(URL(string: "https://example.com/status")), acceptedContentTypes: ["application/json"]))
@@ -148,18 +159,12 @@ struct MonGARSTests {
         #expect(response.statusCode == 200)
         #expect(response.text.contains("\"ok\""))
         #expect(response.latencyMs >= 0)
-
-        TestURLProtocol.handler = nil
     }
 
     @Test func networkClientRejectsHTTPFailures() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TestURLProtocol.self]
         let session = URLSession(configuration: configuration)
-        TestURLProtocol.handler = { request in
-            let response = HTTPURLResponse(url: try #require(request.url), statusCode: 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])
-            return (try #require(response), Data())
-        }
 
         let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
         do {
@@ -168,8 +173,6 @@ struct MonGARSTests {
         } catch NetworkClientError.unacceptableStatus(let status) {
             #expect(status == 503)
         }
-
-        TestURLProtocol.handler = nil
     }
 
     @Test func networkClientBlocksPrivateLANByDefault() async throws {
@@ -186,15 +189,6 @@ struct MonGARSTests {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TestURLProtocol.self]
         let session = URLSession(configuration: configuration)
-        TestURLProtocol.handler = { request in
-            let response = HTTPURLResponse(
-                url: try #require(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["Content-Type": "text/event-stream"]
-            )
-            return (try #require(response), Data("data: one\n\ndata: two\n".utf8))
-        }
 
         let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
         var lines: [String] = []
@@ -206,7 +200,6 @@ struct MonGARSTests {
 
         #expect(lines.contains("data: one"))
         #expect(lines.contains("data: two"))
-        TestURLProtocol.handler = nil
     }
 
     @Test func htmlExtractorReturnsMetadataAndReadableText() {
@@ -245,6 +238,22 @@ struct MonGARSTests {
             _ = try await service.currentWeather(for: "Montreal")
             #expect(Bool(false), "Weather fallback should not fake success without a key.")
         } catch WeatherServiceError.missingAPIKey {
+            #expect(true)
+        }
+    }
+
+    @Test func openWeatherCurrentEndpointDoesNotFakeDailyForecast() async throws {
+        let service = OpenWeatherCompatibleWeatherService(
+            endpoint: "https://example.com/weather",
+            apiKey: "test-key",
+            units: "metric",
+            client: NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0))
+        )
+
+        do {
+            _ = try await service.forecastWeather(for: "Montreal", dayOffset: 1)
+            #expect(Bool(false), "Current-weather fallback must not fake a daily forecast.")
+        } catch WeatherServiceError.forecastUnavailable {
             #expect(true)
         }
     }
@@ -335,6 +344,21 @@ struct MonGARSTests {
 
         #expect(saveResult.output.contains("User name is Alexis"))
         #expect(lookupResult.output.contains("User name is Alexis"))
+    }
+
+    @Test func nameLookupPrefersUserNameMemoryOverOtherNameFacts() async throws {
+        let (container, context) = makeContext()
+        try container.memoryService.save(content: "Project name is Apollo", source: "test", scope: "longTerm", context: context)
+        try container.memoryService.save(content: "User name is Alexis", source: "test", scope: "longTerm", context: context)
+
+        let lookupTool = MemoryLookupTool(memoryService: container.memoryService)
+        let result = try await lookupTool.execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "What is my name", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        #expect(result.output.contains("User name is Alexis"))
+        #expect(!result.output.contains("Project name is Apollo"))
     }
 
     @Test func documentSummaryIntentsWinOverDocumentSearch() {
@@ -1037,6 +1061,30 @@ struct MonGARSTests {
         #expect(provider.capabilities.isLocal)
         let status = await provider.status
         #expect(status.contains("FoundationModels") || status.contains("fallback"))
+    }
+
+    @Test func userFacingResponseSanitizerRemovesInternalSections() {
+        let raw = """
+        **User Goal:** What is my name
+
+        **Assistant Response:**
+
+        User name is Alexis Boulet
+
+        **Assistant Reflection:**
+
+        - The user has successfully requested their name.
+
+        **Final Decision:**
+
+        The user's goal has been satisfied.
+        """
+
+        let sanitized = UserFacingResponseSanitizer.sanitize(raw)
+
+        #expect(sanitized == "User name is Alexis Boulet")
+        #expect(!sanitized.contains("Assistant Reflection"))
+        #expect(!sanitized.contains("Final Decision"))
     }
 }
 

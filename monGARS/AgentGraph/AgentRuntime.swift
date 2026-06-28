@@ -693,11 +693,11 @@ struct AgentLoop: Sendable {
 
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
         if let toolOutput = state.toolResults.last {
-            return toolOutput
+            return UserFacingResponseSanitizer.sanitize(toolOutput)
         }
         let request = LLMRequest(prompt: contextPackage.prompt, conversationContext: [goal], retrievedContext: state.retrievedContext)
         let response = try await provider.complete(request: request)
-        return response.text
+        return UserFacingResponseSanitizer.sanitize(response.text)
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {
@@ -752,6 +752,61 @@ struct AgentLoop: Sendable {
         default:
             return .cancelled
         }
+    }
+}
+
+enum UserFacingResponseSanitizer {
+    private static let internalHeadings = [
+        "Assistant Reflection",
+        "Final Decision",
+        "Output Formatting",
+        "Local Context",
+        "Action",
+        "Conclusion"
+    ]
+
+    static func sanitize(_ text: String) -> String {
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        cleaned = extractAssistantResponse(from: cleaned)
+        cleaned = removeInternalSections(from: cleaned)
+        cleaned = cleaned
+            .replacingOccurrences(of: #"(?m)^\s*\*\*Response:\*\*\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^\s*Response:\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?m)^\s*Reflection:\s*.*$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cleaned.localizedCaseInsensitiveContains("reflect phase") || cleaned.localizedCaseInsensitiveContains("output formatting valid") {
+            return "I could not produce a useful local answer for that request."
+        }
+        return cleaned.isEmpty ? "I could not produce a useful local answer for that request." : cleaned
+    }
+
+    private static func extractAssistantResponse(from text: String) -> String {
+        let markers = ["**Assistant Response:**", "Assistant Response:"]
+        for marker in markers {
+            guard let markerRange = text.range(of: marker, options: [.caseInsensitive]) else { continue }
+            return String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func removeInternalSections(from text: String) -> String {
+        var cleaned = text
+        for heading in internalHeadings {
+            let escaped = NSRegularExpression.escapedPattern(for: heading)
+            cleaned = cleaned.replacingOccurrences(
+                of: #"(?is)\n?\s*\*\*\#(escaped):\*\*.*?(?=\n\s*\*\*[^*]+:\*\*|\z)"#,
+                with: "",
+                options: .regularExpression
+            )
+            cleaned = cleaned.replacingOccurrences(
+                of: #"(?is)\n?\s*\#(escaped):.*?(?=\n\s*[^:\n]{2,60}:|\z)"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        return cleaned
     }
 }
 

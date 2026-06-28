@@ -136,7 +136,7 @@ struct GoalsView: View {
     }
 
     private func resume(_ run: AgentRunRecord) {
-        Task {
+        Task { @MainActor in
             do {
                 let options = AgentRuntimeOptions(
                     autonomyLevel: container.settingsStore.autonomyLevel,
@@ -146,9 +146,7 @@ struct GoalsView: View {
                 )
                 for try await _ in container.agentRuntime.resume(run: run, provider: container.llmProvider(), options: options, context: modelContext) {}
             } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                }
+                errorMessage = error.localizedDescription
             }
         }
     }

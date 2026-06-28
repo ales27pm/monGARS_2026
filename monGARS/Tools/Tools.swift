@@ -141,6 +141,24 @@ private func normalizedIntent(_ input: String) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+private func userVisibleToolError(_ error: Error, fallback: String) -> String {
+    let nsError = error as NSError
+    switch nsError.domain {
+    case kCLErrorDomain:
+        return "Location services could not complete that request. Check Location Services, network connectivity, or provide a named place."
+    case "MKErrorDomain":
+        return "Apple Maps search is unavailable right now. Try a more specific place or address."
+    case NSURLErrorDomain:
+        return "The network request failed. Check connectivity and try again."
+    default:
+        let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty, !description.localizedCaseInsensitiveContains("kCLErrorDomain"), !description.localizedCaseInsensitiveContains("MKErrorDomain") else {
+            return fallback
+        }
+        return description
+    }
+}
+
 private struct WebFetchSummary: Sendable {
     var text: String
     var target: String
@@ -364,7 +382,7 @@ private final class CurrentLocationProbe: NSObject, CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        finish(.failure(error))
+        finish(.failure(Self.normalizedLocationError(error)))
     }
 
     private func finish(_ result: Result<CLLocation, Error>) {
@@ -378,6 +396,20 @@ private final class CurrentLocationProbe: NSObject, CLLocationManagerDelegate {
             continuation.resume(returning: location)
         case .failure(let error):
             continuation.resume(throwing: error)
+        }
+    }
+
+    private static func normalizedLocationError(_ error: Error) -> Error {
+        guard let locationError = error as? CLError else {
+            return error
+        }
+        switch locationError.code {
+        case .denied:
+            return CurrentLocationError.permissionDenied
+        case .locationUnknown, .network, .headingFailure, .rangingUnavailable, .rangingFailure:
+            return CurrentLocationError.unavailable
+        default:
+            return CurrentLocationError.unavailable
         }
     }
 }
@@ -559,16 +591,23 @@ struct WeatherTool: Tool {
             do {
                 let deviceLocation = try await currentDeviceLocation()
                 let locationName = await Self.reverseGeocodedName(for: deviceLocation)
-                let report = try await WeatherServiceFactory.makeConfiguredService().currentWeather(at: deviceLocation, locationName: locationName)
-                return Self.result(for: report, requestedForecast: Self.requestsForecast(request.input))
+                let report = try await Self.weatherReport(
+                    service: WeatherServiceFactory.makeConfiguredService(),
+                    requestInput: request.input,
+                    location: deviceLocation,
+                    locationName: locationName
+                )
+                return Self.result(for: report)
             } catch WeatherServiceError.missingAPIKey {
                 return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
             } catch WeatherServiceError.invalidEndpoint {
                 return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+            } catch WeatherServiceError.forecastUnavailable(let reason) {
+                return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
             } catch WeatherServiceError.weatherKitUnavailable(let reason) {
                 return ToolResult(toolName: name, output: "Weather lookup needs a configured provider. WeatherKit failed: \(reason). Add an OpenWeather-compatible key in Settings or try a named location.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
             } catch {
-                return ToolResult(toolName: name, output: "Weather needs either a location, like 'weather in Montreal', or current-location permission. Current-location lookup failed: \(error.localizedDescription)", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "location_unavailable")
+                return ToolResult(toolName: name, output: "Weather needs either a location, like 'weather in Montreal', or current-location permission. \(userVisibleToolError(error, fallback: "Current-location lookup failed."))", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "location_unavailable")
             }
             #else
             return ToolResult(toolName: name, output: "Provide a location for weather lookup, such as 'weather in Montreal'.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
@@ -576,17 +615,19 @@ struct WeatherTool: Tool {
         }
         let report: WeatherReport
         do {
-            report = try await WeatherServiceFactory.makeConfiguredService().currentWeather(for: location)
+            report = try await Self.weatherReport(service: WeatherServiceFactory.makeConfiguredService(), requestInput: request.input, locationName: location)
         } catch WeatherServiceError.missingAPIKey {
             return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
         } catch WeatherServiceError.invalidEndpoint {
             return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
         } catch WeatherServiceError.geocodingFailed(let failedLocation) {
             return ToolResult(toolName: name, output: WeatherServiceError.geocodingFailed(failedLocation).localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "geocoding_failed")
+        } catch WeatherServiceError.forecastUnavailable(let reason) {
+            return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
         } catch {
-            return ToolResult(toolName: name, output: "Weather lookup failed: \(error.localizedDescription)", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
+            return ToolResult(toolName: name, output: "Weather lookup failed: \(userVisibleToolError(error, fallback: "The weather provider could not complete the request."))", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
         }
-        return Self.result(for: report, requestedForecast: Self.requestsForecast(request.input))
+        return Self.result(for: report)
     }
 
     private static func weatherLocation(from input: String) -> String {
@@ -624,9 +665,30 @@ struct WeatherTool: Tool {
         return lower.contains("forecast") || lower.contains("tomorrow")
     }
 
-    private static func result(for report: WeatherReport, requestedForecast: Bool) -> ToolResult {
-        let prefix = requestedForecast ? "Daily forecast is not available in this build; showing current conditions. " : ""
-        let output = "\(prefix)Weather for \(report.locationName): \(report.condition), \(Int(report.temperature.rounded()))°\(report.temperatureUnit), humidity \(report.humidityPercent)%, wind \(String(format: "%.1f", report.windSpeed)) \(report.windUnit). Provider \(report.provider), \(Int(report.latencyMs)) ms."
+    private static func weatherReport(service: any WeatherService, requestInput: String, locationName: String) async throws -> WeatherReport {
+        if requestsForecast(requestInput) {
+            return try await service.forecastWeather(for: locationName, dayOffset: 1)
+        }
+        return try await service.currentWeather(for: locationName)
+    }
+
+    #if canImport(CoreLocation)
+    private static func weatherReport(service: any WeatherService, requestInput: String, location: CLLocation, locationName: String) async throws -> WeatherReport {
+        if requestsForecast(requestInput) {
+            return try await service.forecastWeather(at: location, locationName: locationName, dayOffset: 1)
+        }
+        return try await service.currentWeather(at: location, locationName: locationName)
+    }
+    #endif
+
+    private static func result(for report: WeatherReport) -> ToolResult {
+        let current = "Current conditions: \(report.condition), \(Int(report.temperature.rounded()))°\(report.temperatureUnit), humidity \(report.humidityPercent)%, wind \(String(format: "%.1f", report.windSpeed)) \(report.windUnit)."
+        let output: String
+        if let forecastSummary = report.forecastSummary {
+            output = "Weather for \(report.locationName): \(forecastSummary). \(current) Provider \(report.provider), \(Int(report.latencyMs)) ms."
+        } else {
+            output = "Weather for \(report.locationName): \(current) Provider \(report.provider), \(Int(report.latencyMs)) ms."
+        }
         return ToolResult(
             toolName: "weather_lookup",
             output: output,
@@ -824,9 +886,10 @@ struct CurrentLocationTool: Tool {
                 latencyMs: latencyMs
             )
         } catch {
+            let message = userVisibleToolError(error, fallback: "Current location failed.")
             return ToolResult(
                 toolName: name,
-                output: "Current location failed: \(error.localizedDescription)",
+                output: "Current location failed: \(message)",
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -937,9 +1000,10 @@ struct MapsTool: Tool {
             )
         } catch {
             let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
+            let message = userVisibleToolError(error, fallback: "Apple Maps search could not complete that request.")
             return ToolResult(
                 toolName: name,
-                output: "MapKit search failed: \(error.localizedDescription). Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
+                output: "MapKit search failed: \(message). Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -1235,7 +1299,11 @@ struct MemoryLookupTool: Tool {
         let records: [MemoryRecord]
         if Self.isNameQuery(request.input) {
             let nameRecords = try memoryService.search(query: "name", context: context)
-            records = nameRecords.isEmpty ? try memoryService.search(query: request.input, context: context) : nameRecords
+            let userNameRecords = nameRecords.filter { record in
+                let content = normalizedIntent(record.content)
+                return content.hasPrefix("user name is") || content.hasPrefix("my name is")
+            }
+            records = userNameRecords.isEmpty ? try memoryService.search(query: request.input, context: context) : userNameRecords
         } else {
             records = try memoryService.search(query: request.input, context: context)
         }
