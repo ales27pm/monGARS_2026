@@ -553,9 +553,26 @@ struct WeatherTool: Tool {
         guard request.networkAccessAllowed else {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
-        let location = cleanedInput(request.input, removing: ["weather in", "weather for", "weather", "forecast in", "forecast for", "forecast"])
+        let location = Self.weatherLocation(from: request.input)
         guard !location.isEmpty else {
-            return ToolResult(toolName: name, output: "Provide a location for weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+            #if canImport(CoreLocation)
+            do {
+                let deviceLocation = try await currentDeviceLocation()
+                let locationName = await Self.reverseGeocodedName(for: deviceLocation)
+                let report = try await WeatherServiceFactory.makeConfiguredService().currentWeather(at: deviceLocation, locationName: locationName)
+                return Self.result(for: report, requestedForecast: Self.requestsForecast(request.input))
+            } catch WeatherServiceError.missingAPIKey {
+                return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+            } catch WeatherServiceError.invalidEndpoint {
+                return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+            } catch WeatherServiceError.weatherKitUnavailable(let reason) {
+                return ToolResult(toolName: name, output: "Weather lookup needs a configured provider. WeatherKit failed: \(reason). Add an OpenWeather-compatible key in Settings or try a named location.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
+            } catch {
+                return ToolResult(toolName: name, output: "Weather needs either a location, like 'weather in Montreal', or current-location permission. Current-location lookup failed: \(error.localizedDescription)", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "location_unavailable")
+            }
+            #else
+            return ToolResult(toolName: name, output: "Provide a location for weather lookup, such as 'weather in Montreal'.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+            #endif
         }
         let report: WeatherReport
         do {
@@ -569,11 +586,51 @@ struct WeatherTool: Tool {
         } catch {
             return ToolResult(toolName: name, output: "Weather lookup failed: \(error.localizedDescription)", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
         }
-        let output = "Weather for \(report.locationName): \(report.condition), \(Int(report.temperature.rounded()))°\(report.temperatureUnit), humidity \(report.humidityPercent)%, wind \(String(format: "%.1f", report.windSpeed)) \(report.windUnit). Provider \(report.provider), \(Int(report.latencyMs)) ms."
+        return Self.result(for: report, requestedForecast: Self.requestsForecast(request.input))
+    }
+
+    private static func weatherLocation(from input: String) -> String {
+        var cleaned = normalizedIntent(input)
+        for phrase in [
+            "what is the weather forecast for tomorrow",
+            "what is the weather forecast tomorrow",
+            "what is the weather tomorrow",
+            "weather forecast for tomorrow",
+            "weather forecast tomorrow",
+            "forecast for tomorrow",
+            "weather tomorrow",
+            "what is the weather",
+            "what s the weather",
+            "weather forecast",
+            "weather in",
+            "weather for",
+            "forecast in",
+            "forecast for",
+            "weather",
+            "forecast",
+            "tomorrow",
+            "today",
+            "current"
+        ].sorted(by: { $0.count > $1.count }) {
+            cleaned = cleaned.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive, .diacriticInsensitive])
+        }
+        return cleaned
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    }
+
+    private static func requestsForecast(_ input: String) -> Bool {
+        let lower = normalizedIntent(input)
+        return lower.contains("forecast") || lower.contains("tomorrow")
+    }
+
+    private static func result(for report: WeatherReport, requestedForecast: Bool) -> ToolResult {
+        let prefix = requestedForecast ? "Daily forecast is not available in this build; showing current conditions. " : ""
+        let output = "\(prefix)Weather for \(report.locationName): \(report.condition), \(Int(report.temperature.rounded()))°\(report.temperatureUnit), humidity \(report.humidityPercent)%, wind \(String(format: "%.1f", report.windSpeed)) \(report.windUnit). Provider \(report.provider), \(Int(report.latencyMs)) ms."
         return ToolResult(
-            toolName: name,
+            toolName: "weather_lookup",
             output: output,
-            riskLevel: riskLevel,
+            riskLevel: .high,
             requiresApproval: true,
             approved: true,
             target: report.target,
@@ -581,6 +638,20 @@ struct WeatherTool: Tool {
             latencyMs: report.latencyMs
         )
     }
+
+    #if canImport(CoreLocation)
+    private static func reverseGeocodedName(for location: CLLocation) async -> String {
+        do {
+            let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
+            if let placemark = placemarks.first {
+                return placemark.locality ?? placemark.name ?? "Current Location"
+            }
+        } catch {
+            return "\(String(format: "%.4f", location.coordinate.latitude)), \(String(format: "%.4f", location.coordinate.longitude))"
+        }
+        return "Current Location"
+    }
+    #endif
 }
 
 struct TextMessageTool: Tool {
@@ -1151,13 +1222,30 @@ struct MemoryLookupTool: Tool {
     let memoryService: MemoryService
 
     func canHandle(_ input: String) -> Bool {
-        input.lowercased().contains("memory") || input.lowercased().contains("remember")
+        let lower = normalizedIntent(input)
+        return lower.contains("memory")
+            || lower.contains("what do you remember")
+            || lower.contains("what is my name")
+            || lower.contains("what s my name")
+            || lower.contains("who am i")
+            || lower.contains("do you know my name")
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
-        let records = try memoryService.search(query: request.input, context: context)
+        let records: [MemoryRecord]
+        if Self.isNameQuery(request.input) {
+            let nameRecords = try memoryService.search(query: "name", context: context)
+            records = nameRecords.isEmpty ? try memoryService.search(query: request.input, context: context) : nameRecords
+        } else {
+            records = try memoryService.search(query: request.input, context: context)
+        }
         let output = records.isEmpty ? "No local memories matched." : records.map(\.content).joined(separator: "\n")
         return ToolResult(toolName: name, output: output)
+    }
+
+    private static func isNameQuery(_ input: String) -> Bool {
+        let lower = normalizedIntent(input)
+        return lower.contains("my name") || lower.contains("who am i")
     }
 }
 
@@ -1167,24 +1255,43 @@ struct MemorySaveTool: Tool {
     let memoryService: MemoryService
 
     func canHandle(_ input: String) -> Bool {
-        let lower = input.lowercased()
+        let lower = normalizedIntent(input)
         return lower.contains("remember that")
             || lower.contains("save memory")
             || lower.contains("save this memory")
             || lower.contains("remember key points")
             || lower.contains("remember the key points")
+            || lower.hasPrefix("remember my ")
+            || lower.contains("remember my name is")
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
-        let content = request.input
+        let content = Self.canonicalMemory(from: request.input)
+        try memoryService.save(content: content.isEmpty ? request.input : content, source: "agent", scope: "longTerm", context: context)
+        return ToolResult(toolName: name, output: "Saved local memory: \(content.isEmpty ? request.input : content)")
+    }
+
+    private static func canonicalMemory(from input: String) -> String {
+        if let name = capturedValue(in: input, pattern: #"(?i)\bremember\s+my\s+name\s+is\s+(.+)$"#) {
+            return "User name is \(name)"
+        }
+        return input
             .replacingOccurrences(of: "remember that", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "save memory", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "save this memory", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "remember the key points", with: "key points", options: .caseInsensitive)
             .replacingOccurrences(of: "remember key points", with: "key points", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        try memoryService.save(content: content.isEmpty ? request.input : content, source: "agent", scope: "longTerm", context: context)
-        return ToolResult(toolName: name, output: "Saved a local memory.")
+    }
+
+    private static func capturedValue(in input: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        guard let match = regex.firstMatch(in: input, range: range), match.numberOfRanges > 1, let captureRange = Range(match.range(at: 1), in: input) else {
+            return nil
+        }
+        let value = String(input[captureRange]).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        return value.isEmpty ? nil : value
     }
 }
 

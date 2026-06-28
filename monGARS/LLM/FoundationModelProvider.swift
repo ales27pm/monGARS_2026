@@ -33,7 +33,7 @@ struct FoundationModelProvider: LLMProvider {
                 return LLMResponse(text: response.content, providerName: name)
             } catch {
                 let fallbackResponse = try await fallback.complete(request: request)
-                return LLMResponse(text: "\(fallbackResponse.text)\n\nFoundation Models was unavailable at runtime, so I used the local fallback.", providerName: fallbackResponse.providerName)
+                return LLMResponse(text: fallbackResponse.text, providerName: fallbackResponse.providerName)
             }
         }
 #endif

@@ -24,6 +24,9 @@ struct WeatherReport: Sendable, Equatable {
 
 protocol WeatherService: Sendable {
     func currentWeather(for location: String) async throws -> WeatherReport
+    #if canImport(CoreLocation)
+    func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport
+    #endif
 }
 
 enum WeatherServiceError: LocalizedError, Equatable {
@@ -79,24 +82,56 @@ struct CompositeWeatherService: WeatherService {
         }
         return try await fallback.currentWeather(for: location)
     }
+
+    #if canImport(CoreLocation)
+    func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport {
+        if let primary {
+            do {
+                return try await primary.currentWeather(at: location, locationName: locationName)
+            } catch WeatherServiceError.weatherKitUnavailable {
+                return try await fallback.currentWeather(at: location, locationName: locationName)
+            } catch {
+                if AppNetworkConfiguration.weatherAPIKey.isEmpty {
+                    throw error
+                }
+                return try await fallback.currentWeather(at: location, locationName: locationName)
+            }
+        }
+        return try await fallback.currentWeather(at: location, locationName: locationName)
+    }
+    #endif
 }
 
 struct WeatherKitWeatherService: WeatherService {
     func currentWeather(for location: String) async throws -> WeatherReport {
         #if canImport(WeatherKit) && canImport(CoreLocation)
-        let started = ContinuousClock.now
-        let placemarks = try await CLGeocoder().geocodeAddressString(location)
+        let placemarks: [CLPlacemark]
+        do {
+            placemarks = try await CLGeocoder().geocodeAddressString(location)
+        } catch {
+            throw WeatherServiceError.geocodingFailed(location)
+        }
         guard let coordinate = placemarks.first?.location?.coordinate else {
             throw WeatherServiceError.geocodingFailed(location)
         }
+        return try await currentWeather(at: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude), locationName: placemarks.first?.locality ?? placemarks.first?.name ?? location)
+        #else
+        throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
+        #endif
+    }
+
+    #if canImport(CoreLocation)
+    func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport {
+        #if canImport(WeatherKit)
+        let started = ContinuousClock.now
         do {
-            let weather = try await WeatherKit.WeatherService.shared.weather(for: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
+            let weather = try await WeatherKit.WeatherService.shared.weather(for: location)
             let current = weather.currentWeather
             let temperature = current.temperature.converted(to: UnitTemperature.celsius).value
             let windSpeed = current.wind.speed.converted(to: UnitSpeed.metersPerSecond).value
             let latency = Self.latencyMilliseconds(started.duration(to: ContinuousClock.now))
             return WeatherReport(
-                locationName: placemarks.first?.locality ?? placemarks.first?.name ?? location,
+                locationName: locationName,
                 condition: current.condition.description,
                 temperature: temperature,
                 temperatureUnit: "C",
@@ -115,6 +150,7 @@ struct WeatherKitWeatherService: WeatherService {
         throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
         #endif
     }
+    #endif
 
     private static func latencyMilliseconds(_ duration: Duration) -> Double {
         Double(duration.components.seconds * 1_000) + Double(duration.components.attoseconds) / 1_000_000_000_000_000
@@ -160,6 +196,43 @@ struct OpenWeatherCompatibleWeatherService: WeatherService {
             latencyMs: response.latencyMs
         )
     }
+
+    #if canImport(CoreLocation)
+    func currentWeather(at location: CLLocation, locationName: String) async throws -> WeatherReport {
+        guard !apiKey.isEmpty else {
+            throw WeatherServiceError.missingAPIKey
+        }
+        guard var components = URLComponents(string: endpoint) else {
+            throw WeatherServiceError.invalidEndpoint
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "lat", value: String(location.coordinate.latitude)))
+        queryItems.append(URLQueryItem(name: "lon", value: String(location.coordinate.longitude)))
+        queryItems.append(URLQueryItem(name: "appid", value: apiKey))
+        queryItems.append(URLQueryItem(name: "units", value: units))
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw WeatherServiceError.invalidEndpoint
+        }
+
+        let response = try await client.send(NetworkRequest(url: url, acceptedContentTypes: ["application/json"]))
+        let weather = try response.decodedJSON(OpenWeatherPayload.self)
+        let unit = Self.temperatureUnit(for: units)
+        return WeatherReport(
+            locationName: weather.name.isEmpty ? locationName : weather.name,
+            condition: weather.weather.first?.description ?? "conditions unavailable",
+            temperature: weather.main.temp,
+            temperatureUnit: unit,
+            humidityPercent: weather.main.humidity,
+            windSpeed: weather.wind?.speed ?? 0,
+            windUnit: units == "imperial" ? "mph" : "m/s",
+            provider: "OpenWeather-compatible",
+            target: response.finalURL.host ?? response.finalURL.absoluteString,
+            statusCode: response.statusCode,
+            latencyMs: response.latencyMs
+        )
+    }
+    #endif
 
     private static func temperatureUnit(for units: String) -> String {
         switch units {

@@ -275,6 +275,7 @@ struct MonGARSTests {
             ("schedule team sync tomorrow", "calendar_manager"),
             ("find contact Sarah", "contacts_lookup"),
             ("weather in Montreal", "weather_lookup"),
+            ("what is the weather forecast for tomorrow", "weather_lookup"),
             ("where am I", "current_location"),
             ("show me where I am on map", "current_location"),
             ("map nearest coffee shop", "maps_lookup"),
@@ -295,7 +296,8 @@ struct MonGARSTests {
             "save memory project alpha ships Friday",
             "save this memory: the demo uses local documents",
             "remember key points from this summary",
-            "remember the key points from this summary"
+            "remember the key points from this summary",
+            "remember my name is Alexis"
         ]
 
         for input in cases {
@@ -307,12 +309,32 @@ struct MonGARSTests {
         let (container, _) = makeContext()
         let cases = [
             "search memory for project alpha",
-            "what do you remember about the demo"
+            "what do you remember about the demo",
+            "what is my name",
+            "who am I"
         ]
 
         for input in cases {
             #expect(container.toolRouter.route(input: input)?.name == "memory_lookup")
         }
+    }
+
+    @Test func explicitNameMemorySaveCanBeLookedUp() async throws {
+        let (container, context) = makeContext()
+        let saveTool = MemorySaveTool(memoryService: container.memoryService)
+        let lookupTool = MemoryLookupTool(memoryService: container.memoryService)
+
+        let saveResult = try await saveTool.execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "Remember my name is Alexis", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+        let lookupResult = try await lookupTool.execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "What is my name", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        #expect(saveResult.output.contains("User name is Alexis"))
+        #expect(lookupResult.output.contains("User name is Alexis"))
     }
 
     @Test func documentSummaryIntentsWinOverDocumentSearch() {

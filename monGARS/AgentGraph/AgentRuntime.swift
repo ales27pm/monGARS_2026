@@ -547,7 +547,7 @@ struct AgentLoop: Sendable {
             }
         }
 
-        if state.plan?.shouldRemember == true, needsPhase(.saveMemory, state: state) {
+        if state.plan?.shouldRemember == true, state.selectedToolName != "memory_save", needsPhase(.saveMemory, state: state) {
             let memory = durableMemory(from: goal, state: state)
             try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
             try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
