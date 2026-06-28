@@ -238,6 +238,7 @@ final class ToolCallRecord {
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
+    var payloadHash: String
     var statusCode: Int?
     var latencyMs: Double
     var errorCategory: String?
@@ -253,6 +254,7 @@ final class ToolCallRecord {
         requiresApproval: Bool,
         approved: Bool,
         target: String? = nil,
+        payloadHash: String = "",
         statusCode: Int? = nil,
         latencyMs: Double = 0,
         errorCategory: String? = nil,
@@ -267,6 +269,15 @@ final class ToolCallRecord {
         self.requiresApproval = requiresApproval
         self.approved = approved
         self.target = target
+        self.payloadHash = payloadHash.isEmpty
+            ? ApprovalTupleHasher.payloadHash(
+                toolName: toolName,
+                target: target,
+                normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: toolName, input: input, target: target),
+                riskLevel: riskLevel,
+                sessionID: runID
+            )
+            : payloadHash
         self.statusCode = statusCode
         self.latencyMs = latencyMs
         self.errorCategory = errorCategory
@@ -278,20 +289,81 @@ final class ToolCallRecord {
 final class ApprovalRequestRecord {
     var id: UUID
     var runID: UUID
+    var sessionID: UUID
     var actionName: String
+    var toolName: String
+    var target: String?
+    var normalizedArgumentsJSON: String
+    var payloadHash: String
+    var riskLevelRawValue: String
     var reason: String
+    var userVisibleDiff: String
+    var expiresAt: Date
     var approved: Bool?
     var createdAt: Date
     var resolvedAt: Date?
 
-    init(id: UUID = UUID(), runID: UUID, actionName: String, reason: String, approved: Bool? = nil, createdAt: Date = .now, resolvedAt: Date? = nil) {
+    init(
+        id: UUID = UUID(),
+        runID: UUID,
+        actionName: String,
+        reason: String,
+        approved: Bool? = nil,
+        createdAt: Date = .now,
+        resolvedAt: Date? = nil,
+        sessionID: UUID? = nil,
+        toolName: String? = nil,
+        target: String? = nil,
+        normalizedArgumentsJSON: String = "{}",
+        payloadHash: String? = nil,
+        riskLevelRawValue: String = "high",
+        userVisibleDiff: String? = nil,
+        expiresAt: Date? = nil
+    ) {
+        let resolvedSessionID = sessionID ?? runID
+        let resolvedToolName = toolName ?? actionName
+        let resolvedArguments = ApprovalTupleHasher.normalizedJSON(normalizedArgumentsJSON)
         self.id = id
         self.runID = runID
+        self.sessionID = resolvedSessionID
         self.actionName = actionName
+        self.toolName = resolvedToolName
+        self.target = target
+        self.normalizedArgumentsJSON = resolvedArguments
+        self.riskLevelRawValue = riskLevelRawValue
+        self.payloadHash = payloadHash ?? ApprovalTupleHasher.payloadHash(
+            toolName: resolvedToolName,
+            target: target,
+            normalizedArgumentsJSON: resolvedArguments,
+            riskLevel: riskLevelRawValue,
+            sessionID: resolvedSessionID
+        )
         self.reason = reason
+        self.userVisibleDiff = userVisibleDiff ?? reason
+        self.expiresAt = expiresAt ?? createdAt.addingTimeInterval(5 * 60)
         self.approved = approved
         self.createdAt = createdAt
         self.resolvedAt = resolvedAt
+    }
+
+    var riskLevel: ToolRiskLevel {
+        ToolRiskLevel(rawValue: riskLevelRawValue) ?? .high
+    }
+
+    func isExpired(at date: Date = .now) -> Bool {
+        date > expiresAt
+    }
+
+    func approvalTuple() -> ApprovalTuple {
+        ApprovalTuple(
+            toolName: toolName,
+            target: target,
+            normalizedArgumentsJSON: normalizedArgumentsJSON,
+            riskLevel: riskLevel,
+            expiresAt: expiresAt,
+            sessionID: sessionID,
+            userVisibleDiff: userVisibleDiff
+        )
     }
 }
 
