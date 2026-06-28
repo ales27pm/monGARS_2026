@@ -97,7 +97,7 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 - Full XCTest execution currently passes on the `monGARS Test iPhone` simulator when run without rebuilding after `build-for-testing`.
 - Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. Current project build number is `202606280033`.
 - Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
-- Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
+- Document retrieval uses local hybrid lexical + NaturalLanguage semantic ranking when Apple sentence embeddings are available. The Core ML `DocumentEmbedding` hook remains optional/future-facing for a bundled custom model.
 - Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.
 - WeatherKit requires the Apple WeatherKit entitlement and valid provisioning on device. Without it, weather lookup falls back to the configured OpenWeather-compatible endpoint and Keychain-stored API key.
 - Web fetch extracts title, meta description, canonical URL, and readable text from HTML; plain text and JSON previews are bounded; PDF downloads use PDFKit text extraction when selectable text is present.

@@ -23,10 +23,17 @@ enum EmbeddingProviderStatus: Sendable, Equatable {
 
 protocol EmbeddingProvider: Sendable {
     var status: EmbeddingProviderStatus { get }
+    var providerName: String { get }
     func embedding(for text: String) throws -> [Float]
 }
 
+extension EmbeddingProvider {
+    var providerName: String { String(describing: Self.self) }
+}
+
 struct CoreMLEmbeddingProvider: EmbeddingProvider {
+    var providerName: String { "CoreML DocumentEmbedding" }
+
     var status: EmbeddingProviderStatus {
         #if canImport(CoreML)
         guard Self.modelURL() != nil else {
@@ -56,7 +63,22 @@ struct CoreMLEmbeddingProvider: EmbeddingProvider {
 }
 
 struct DocumentService: Sendable {
-    var embeddingProvider: any EmbeddingProvider = CoreMLEmbeddingProvider()
+    private static let semanticInclusionThreshold = 0.20
+    private static let semanticScoreWeight = 10.0
+
+    var embeddingProvider: any EmbeddingProvider = DefaultEmbeddingProvider()
+
+    var embeddingStatusDescription: String {
+        if let provider = embeddingProvider as? DefaultEmbeddingProvider {
+            return provider.diagnosticDescription
+        }
+        switch embeddingProvider.status {
+        case .available:
+            return "available via \(embeddingProvider.providerName)"
+        case .unavailable(let reason):
+            return "unavailable: \(reason)"
+        }
+    }
 
     func importDocument(url: URL, context: ModelContext) throws {
         let scoped = url.startAccessingSecurityScopedResource()
@@ -100,12 +122,16 @@ struct DocumentService: Sendable {
         guard !terms.isEmpty else { return [] }
         try ensureChunksExist(context: context)
         let chunks = try context.fetch(FetchDescriptor<DocumentChunkRecord>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
+        let queryEmbedding = embeddingIfAvailable(for: query)
         return chunks.compactMap { chunk in
-            let score = lexicalScore(for: chunk, terms: terms, query: query)
-            guard score > 0 else { return nil }
+            let lexicalScore = lexicalScore(for: chunk, terms: terms, query: query)
+            let semanticScore = semanticScore(for: chunk, queryEmbedding: queryEmbedding)
+            let semanticContributed = semanticScore >= Self.semanticInclusionThreshold
+            guard lexicalScore > 0 || semanticContributed else { return nil }
             let matched = terms.filter { term in
                 chunk.title.localizedCaseInsensitiveContains(term) || chunk.text.localizedCaseInsensitiveContains(term)
             }
+            let score = lexicalScore + semanticScore * Self.semanticScoreWeight
             return DocumentRetrievalResult(
                 documentID: chunk.documentID,
                 title: chunk.title,
@@ -113,11 +139,14 @@ struct DocumentService: Sendable {
                 highlightedText: highlighted(chunk.text, terms: matched),
                 score: score,
                 matchedTerms: matched,
-                source: chunk.embeddingData == nil ? "lexical" : "embedding"
+                source: resultSource(lexicalScore: lexicalScore, semanticContributed: semanticContributed)
             )
         }
         .sorted { lhs, rhs in
             if lhs.score == rhs.score {
+                if lhs.title == rhs.title {
+                    return chunkIndex(for: lhs, in: chunks) < chunkIndex(for: rhs, in: chunks)
+                }
                 return lhs.title < rhs.title
             }
             return lhs.score > rhs.score
@@ -139,7 +168,19 @@ struct DocumentService: Sendable {
         }
 
         let chunks = chunkedText(document.content)
+        let canEmbed: Bool
+        if case .available = embeddingProvider.status {
+            canEmbed = true
+        } else {
+            canEmbed = false
+        }
         for (index, text) in chunks.enumerated() {
+            let embeddingData: Data?
+            if canEmbed, let embedding = try? embeddingProvider.embedding(for: text) {
+                embeddingData = DocumentEmbeddingVector.encode(embedding)
+            } else {
+                embeddingData = nil
+            }
             context.insert(DocumentChunkRecord(
                 documentID: document.id,
                 title: document.title,
@@ -147,7 +188,7 @@ struct DocumentService: Sendable {
                 chunkIndex: index,
                 tokenEstimate: max(1, text.count / 4),
                 lexicalTerms: Array(normalizedTerms(text).prefix(80)),
-                embeddingData: nil
+                embeddingData: embeddingData
             ))
         }
     }
@@ -188,8 +229,40 @@ struct DocumentService: Sendable {
             score += Double(textMatches * 2 + titleMatches * 4 + lexicalMatches)
         }
 
+        guard score > 0 else { return 0 }
         let recencyHours = abs(chunk.updatedAt.timeIntervalSinceNow) / 3_600
         return score + max(0, 0.25 - min(0.25, recencyHours / 10_000))
+    }
+
+    private func embeddingIfAvailable(for text: String) -> [Float]? {
+        guard case .available = embeddingProvider.status else { return nil }
+        return try? embeddingProvider.embedding(for: text)
+    }
+
+    private func semanticScore(for chunk: DocumentChunkRecord, queryEmbedding: [Float]?) -> Double {
+        guard let queryEmbedding,
+              let embeddingData = chunk.embeddingData,
+              let chunkEmbedding = DocumentEmbeddingVector.decode(embeddingData),
+              let similarity = DocumentEmbeddingVector.cosineSimilarity(queryEmbedding, chunkEmbedding) else {
+            return 0
+        }
+        return max(0, similarity)
+    }
+
+    private func resultSource(lexicalScore: Double, semanticContributed: Bool) -> String {
+        if lexicalScore > 0, semanticContributed {
+            return "hybrid"
+        }
+        if semanticContributed {
+            return "embedding"
+        }
+        return "lexical"
+    }
+
+    private func chunkIndex(for result: DocumentRetrievalResult, in chunks: [DocumentChunkRecord]) -> Int {
+        chunks.first { chunk in
+            chunk.documentID == result.documentID && chunk.text == result.chunkText
+        }?.chunkIndex ?? Int.max
     }
 
     private func chunkedText(_ content: String, wordsPerChunk: Int = 160, overlap: Int = 32) -> [String] {

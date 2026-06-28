@@ -93,6 +93,29 @@ final class LockedUUID: @unchecked Sendable {
     }
 }
 
+private struct UnavailableTestEmbeddingProvider: EmbeddingProvider {
+    var status: EmbeddingProviderStatus { .unavailable("Test embeddings disabled.") }
+
+    func embedding(for text: String) throws -> [Float] {
+        throw PersistenceError.importFailed("Test embeddings disabled.")
+    }
+}
+
+private struct DeterministicTestEmbeddingProvider: EmbeddingProvider {
+    var status: EmbeddingProviderStatus { .available }
+
+    func embedding(for text: String) throws -> [Float] {
+        let lower = text.lowercased()
+        if lower.contains("car") || lower.contains("automobile") || lower.contains("engine") {
+            return [1, 0, 0]
+        }
+        if lower.contains("weather") {
+            return [0, 1, 0]
+        }
+        return [0, 0, 1]
+    }
+}
+
 #if canImport(UIKit)
 private func makePDFData(text: String) -> Data {
     let data = NSMutableData()
@@ -681,20 +704,69 @@ struct MonGARSTests {
     }
 
     @Test func documentServiceRanksAndHighlightsChunks() throws {
-        let (container, context) = makeContext()
+        let (_, context) = makeContext()
+        let documentService = DocumentService(embeddingProvider: UnavailableTestEmbeddingProvider())
         let first = DocumentRecord(title: "Architecture.md", content: "Privacy first local agent. " + String(repeating: "telemetry buffer ", count: 12))
         let second = DocumentRecord(title: "Notes.md", content: "A short note about weather.")
         context.insert(first)
         context.insert(second)
-        try container.documentService.rebuildChunks(for: first, context: context)
-        try container.documentService.rebuildChunks(for: second, context: context)
+        try documentService.rebuildChunks(for: first, context: context)
+        try documentService.rebuildChunks(for: second, context: context)
         try context.save()
 
-        let results = try container.documentService.rankedSnippets(matching: "telemetry buffer", context: context)
+        let results = try documentService.rankedSnippets(matching: "telemetry buffer", context: context)
         #expect(results.first?.title == "Architecture.md")
         #expect(results.first?.highlightedText.contains("**telemetry**") == true)
         #expect(results.first?.highlightedText.contains("**buffer**") == true)
         #expect(results.first?.source == "lexical")
+    }
+
+    @Test func documentEmbeddingVectorRoundTripsLittleEndianFloat32() throws {
+        let vector: [Float] = [0.1, -0.2, 3.5]
+
+        let decoded = try #require(DocumentEmbeddingVector.decode(DocumentEmbeddingVector.encode(vector)))
+
+        #expect(decoded.count == vector.count)
+        for index in vector.indices {
+            #expect(abs(decoded[index] - vector[index]) < 0.000_001)
+        }
+    }
+
+    @Test func documentEmbeddingCosineSimilarityHandlesCommonCases() throws {
+        let identical = try #require(DocumentEmbeddingVector.cosineSimilarity([1, 2, 3], [1, 2, 3]))
+        let orthogonal = try #require(DocumentEmbeddingVector.cosineSimilarity([1, 0], [0, 1]))
+
+        #expect(abs(identical - 1) < 0.000_001)
+        #expect(abs(orthogonal) < 0.000_001)
+        #expect(DocumentEmbeddingVector.cosineSimilarity([1, 0], [1]) == nil)
+    }
+
+    @Test func documentRebuildStoresEmbeddingsWhenProviderAvailable() throws {
+        let (_, context) = makeContext()
+        let documentService = DocumentService(embeddingProvider: DeterministicTestEmbeddingProvider())
+        let document = DocumentRecord(title: "Vehicle.md", content: "automobile engine")
+        context.insert(document)
+
+        try documentService.rebuildChunks(for: document, context: context)
+        try context.save()
+
+        let chunks = try context.fetch(FetchDescriptor<DocumentChunkRecord>())
+        #expect(chunks.contains { $0.embeddingData != nil })
+    }
+
+    @Test func hybridDocumentSearchReturnsEmbeddingOnlySemanticMatch() throws {
+        let (_, context) = makeContext()
+        let documentService = DocumentService(embeddingProvider: DeterministicTestEmbeddingProvider())
+        let document = DocumentRecord(title: "Vehicle.md", content: "automobile engine")
+        context.insert(document)
+        try documentService.rebuildChunks(for: document, context: context)
+        try context.save()
+
+        let results = try documentService.rankedSnippets(matching: "car", context: context)
+
+        #expect(results.first?.title == "Vehicle.md")
+        #expect(results.first?.source == "embedding" || results.first?.source == "hybrid")
+        #expect(results.first?.matchedTerms.isEmpty == true)
     }
 
     @Test func documentDeleteRemovesChunks() throws {

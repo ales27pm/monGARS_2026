@@ -64,7 +64,7 @@ enum DeveloperDiagnosticsRunner {
         appendAppSection(to: &builder)
         appendConfigurationSection(settings: settings, to: &builder)
         appendSecurityChecks(settings: settings, to: &builder)
-        appendFrameworkSection(to: &builder)
+        appendFrameworkSection(documentService: container.documentService, to: &builder)
         appendPermissionSection(to: &builder)
         appendSwiftDataCounts(context: context, to: &builder)
         await appendRealToolE2E(container: container, context: context, to: &builder)
@@ -422,7 +422,7 @@ enum DeveloperDiagnosticsRunner {
         builder.add("")
     }
 
-    private static func appendFrameworkSection(to builder: inout ReportBuilder) {
+    private static func appendFrameworkSection(documentService: DocumentService, to builder: inout ReportBuilder) {
         builder.add("Framework Availability")
         #if canImport(WeatherKit)
         builder.add("- WeatherKit: compiled in; entitlement/provisioning still required at runtime")
@@ -447,6 +447,7 @@ enum DeveloperDiagnosticsRunner {
         #else
         builder.add("- PDFKit: unavailable")
         #endif
+        builder.add("- Document embeddings: \(documentService.embeddingStatusDescription)")
         builder.add("")
     }
 

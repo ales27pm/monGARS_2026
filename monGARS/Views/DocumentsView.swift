@@ -84,7 +84,9 @@ struct DocumentsView: View {
 
     private func search() {
         do {
-            snippets = try container.documentService.snippets(matching: query, context: modelContext)
+            snippets = try container.documentService.rankedSnippets(matching: query, context: modelContext).map { result in
+                "\(result.title) [\(result.source) \(String(format: "%.2f", result.score))]: \(result.highlightedText)"
+            }
             if snippets.isEmpty {
                 errorMessage = "No document snippets matched that query."
             } else {

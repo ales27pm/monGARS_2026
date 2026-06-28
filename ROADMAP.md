@@ -12,7 +12,7 @@
 - Add richer natural-language date and recurrence parsing for approved reminder and calendar tools.
 - Add export/import for local memories and documents.
 - Add per-conversation provider overrides.
-- Add a bundled `DocumentEmbedding` Core ML model and enable semantic ranking through the existing embedding provider seam.
+- Add a bundled `DocumentEmbedding` Core ML model as an optional custom upgrade to the current local NaturalLanguage semantic ranking.
 
 ## Later
 
@@ -26,6 +26,7 @@
 - Added continuation-backed inline approval suspension in `AgentRuntime`.
 - Added routing coverage for memory-save intents and document-summary intents.
 - Added richer document retrieval with chunk ranking and highlighted matches.
+- Added local NaturalLanguage-backed semantic document embeddings with hybrid lexical/vector retrieval.
 - Added live speech dictation into the Chat composer through `SpeechService`.
 - Added timeline and graph visualizations for the Diagnostics screen.
 - Added privacy-gated tools for native reminders/calendar with local fallback, Contacts lookup, weather, messages, phone, email, maps, integrated webview navigation, web fetch, and app-local file actions.
