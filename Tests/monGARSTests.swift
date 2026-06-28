@@ -63,6 +63,15 @@ struct MonGARSTests {
         #expect(expected.isSubset(of: toolNames))
     }
 
+    @Test func compactNavigationSmokeTestBuildsRootSections() {
+        let (container, _) = makeContext()
+        _ = RootView(container: container)
+
+        #expect(AppSection.allCases.map(\.title) == ["Chat", "Memories", "Documents", "Goals", "Diagnostics", "Settings"])
+        #expect(AppSection.allCases.allSatisfy { !$0.icon.isEmpty })
+        #expect(AppSection.chat.id == "chat")
+    }
+
     @Test func toolRouterRoutesPrivacyGatedTools() {
         let (container, _) = makeContext()
         let cases: [(String, String)] = [
@@ -81,6 +90,46 @@ struct MonGARSTests {
 
         for testCase in cases {
             #expect(container.toolRouter.route(input: testCase.0)?.name == testCase.1)
+        }
+    }
+
+    @Test func memorySaveIntentsWinOverMemoryLookup() {
+        let (container, _) = makeContext()
+        let cases = [
+            "remember that my passport expires in July",
+            "save memory project alpha ships Friday",
+            "save this memory: the demo uses local documents",
+            "remember key points from this summary",
+            "remember the key points from this summary"
+        ]
+
+        for input in cases {
+            #expect(container.toolRouter.route(input: input)?.name == "memory_save")
+        }
+    }
+
+    @Test func memoryLookupStillHandlesReadOnlyMemoryQueries() {
+        let (container, _) = makeContext()
+        let cases = [
+            "search memory for project alpha",
+            "what do you remember about the demo"
+        ]
+
+        for input in cases {
+            #expect(container.toolRouter.route(input: input)?.name == "memory_lookup")
+        }
+    }
+
+    @Test func documentSummaryIntentsWinOverDocumentSearch() {
+        let (container, _) = makeContext()
+        let cases = [
+            "summarize my imported document",
+            "summarize my imported document and remember the key points",
+            "document summary for the imported notes"
+        ]
+
+        for input in cases {
+            #expect(container.toolRouter.route(input: input)?.name == "document_summary")
         }
     }
 
@@ -110,6 +159,23 @@ struct MonGARSTests {
             } catch {
                 #expect(Bool(false), "\(tool.name) threw unexpected error: \(error)")
             }
+        }
+    }
+
+    @Test func approvedNetworkToolsStayDisabledUntilSettingsAllowsNetwork() async throws {
+        let (_, context) = makeContext()
+        let tools: [(any Tool, String)] = [
+            (WeatherTool(), "weather in Montreal"),
+            (WebViewTool(), "open webview https://example.com"),
+            (WebFetchTool(), "fetch https://example.com"),
+            (RemoteNetworkTool(), "remote network check")
+        ]
+
+        for (tool, input) in tools {
+            let request = ToolExecutionRequest(runID: UUID(), input: input, autonomyLevel: .auto, approved: true, networkAccessAllowed: false)
+            let result = try await tool.execute(request: request, context: context)
+            #expect(result.output.contains("Network tools are disabled in Settings"))
+            #expect(result.requiresApproval)
         }
     }
 
@@ -251,9 +317,17 @@ struct MonGARSTests {
 
     @Test func autonomousRuntimeCompletesAndPersistsTrace() async throws {
         let (container, context) = makeContext()
+        let document = DocumentRecord(
+            title: "Demo Notes.md",
+            content: "The demo document says monGARS should summarize imported Markdown and remember the privacy-first key points."
+        )
+        context.insert(document)
+        try container.documentService.rebuildChunks(for: document, context: context)
+        try context.save()
+
         var finalResponse = ""
         for try await event in container.agentRuntime.run(
-            goal: "summarize my imported document and remember key points",
+            goal: "summarize my imported document and remember the key points",
             conversationID: nil,
             messages: [],
             provider: MockLLMProvider(),
@@ -268,11 +342,15 @@ struct MonGARSTests {
         let runs = try context.fetch(FetchDescriptor<AgentRunRecord>())
         let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
         let memories = try context.fetch(FetchDescriptor<MemoryRecord>())
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>())
         #expect(runs.first?.statusRawValue == AgentRunStatus.completed.rawValue)
+        #expect(traces.contains { $0.phase == AgentPhase.selectTool.rawValue && $0.message.contains("document_summary") })
         #expect(traces.contains { $0.phase == AgentPhase.plan.rawValue })
         #expect(traces.contains { $0.phase == AgentPhase.reflect.rawValue })
-        #expect(memories.contains { $0.source.contains("agentRun") })
+        #expect(toolCalls.contains { $0.toolName == "document_summary" && $0.output.contains("Demo Notes.md") })
+        #expect(memories.contains { $0.source.contains("agentRun") && $0.content.contains("Demo Notes.md") })
         #expect(!finalResponse.isEmpty)
+        #expect(finalResponse.contains("Demo Notes.md"))
     }
 
     @Test func autonomousRuntimePersistsMaxStepStop() async throws {
@@ -294,6 +372,43 @@ struct MonGARSTests {
         let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
         #expect(run.statusRawValue == AgentRunStatus.maxStepsReached.rawValue)
         #expect(run.lastError == AgentRuntimeError.maxStepsReached.localizedDescription)
+        #expect(run.completedAt != nil)
+    }
+
+    @Test func pauseAndCancelPersistControlDiagnostics() throws {
+        let (container, context) = makeContext()
+        let runID = UUID()
+        let run = AgentRunRecord(
+            id: runID,
+            goal: "calculate 2 + 3",
+            statusRawValue: AgentRunStatus.running.rawValue,
+            currentPhase: AgentPhase.plan.rawValue,
+            currentStep: 3,
+            requiresApproval: true
+        )
+        let approval = ApprovalRequestRecord(runID: runID, actionName: "memory_delete", reason: "Needs approval.")
+        context.insert(run)
+        context.insert(approval)
+        try context.save()
+
+        try container.agentRuntime.pause(run: run, context: context)
+        var traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+        var checkpoints = try context.fetch(FetchDescriptor<AgentCheckpointRecord>())
+        #expect(run.statusRawValue == AgentRunStatus.paused.rawValue)
+        #expect(run.requiresApproval == false)
+        #expect(traces.contains { $0.runID == runID && $0.message == "Run paused by user." })
+        #expect(checkpoints.contains { $0.runID == runID && $0.nodeID == AgentRunStatus.paused.rawValue })
+
+        try container.agentRuntime.cancel(run: run, context: context)
+        traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+        checkpoints = try context.fetch(FetchDescriptor<AgentCheckpointRecord>())
+        let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>())
+        #expect(run.statusRawValue == AgentRunStatus.cancelled.rawValue)
+        #expect(run.lastError == AgentRuntimeError.cancelled.localizedDescription)
+        #expect(run.completedAt != nil)
+        #expect(approvals.first?.approved == false)
+        #expect(traces.contains { $0.runID == runID && $0.message == "Run cancelled by user." })
+        #expect(checkpoints.contains { $0.runID == runID && $0.nodeID == AgentRunStatus.cancelled.rawValue })
     }
 
     @Test func approvalGateBlocksDestructiveMemoryDelete() async throws {
@@ -426,6 +541,45 @@ struct MonGARSTests {
         #expect(completedResponse.contains("Deleted"))
     }
 
+    @Test func resumePausedRunUsesDurablePhaseCheckpoint() async throws {
+        let (container, context) = makeContext()
+        var state = AgentLoopState(runID: UUID(), goal: "calculate 4 * 5")
+        state.phase = .selectTool
+        state.stepIndex = 4
+        state.completedNodeIDs = [
+            AgentPhase.understandIntent.rawValue,
+            AgentPhase.retrieveContext.rawValue,
+            AgentPhase.plan.rawValue,
+            AgentPhase.selectTool.rawValue
+        ]
+        state.selectedToolName = "calculator"
+        let stateData = try JSONEncoder().encode(state)
+
+        let run = AgentRunRecord(
+            id: state.runID,
+            goal: state.goal,
+            statusRawValue: AgentRunStatus.paused.rawValue,
+            currentPhase: AgentPhase.selectTool.rawValue,
+            currentStep: state.stepIndex,
+            maxSteps: 12
+        )
+        context.insert(run)
+        context.insert(AgentCheckpointRecord(runID: state.runID, nodeID: AgentPhase.selectTool.rawValue, stateSummary: state.summary, stateData: stateData))
+        try context.save()
+
+        var completedResponse = ""
+        for try await event in container.agentRuntime.resume(run: run, provider: MockLLMProvider(), context: context) {
+            if case .completed(_, let response) = event {
+                completedResponse = response
+            }
+        }
+
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        #expect(run.statusRawValue == AgentRunStatus.completed.rawValue)
+        #expect(toolCalls.count == 1)
+        #expect(completedResponse.contains("20"))
+    }
+
     @Test func contextBuilderHonorsBudget() throws {
         let (container, context) = makeContext()
         let builder = ContextBuilder(memoryService: container.memoryService, documentService: container.documentService)
@@ -501,7 +655,7 @@ struct MonGARSTests {
         #expect(!package.prompt.contains("raw message 0 SHOULD_NOT_ALL_APPEAR"))
     }
 
-    @Test func checkpointsReducePayloadExceptApprovalPause() async throws {
+    @Test func checkpointsPersistResumablePayloadsIncludingApprovalPause() async throws {
         let (container, context) = makeContext()
         for try await _ in container.agentRuntime.run(
             goal: "calculate 2 + 3",
@@ -514,7 +668,7 @@ struct MonGARSTests {
 
         let lowRiskCheckpoints = try context.fetch(FetchDescriptor<AgentCheckpointRecord>())
         #expect(!lowRiskCheckpoints.isEmpty)
-        #expect(lowRiskCheckpoints.allSatisfy { $0.stateData == nil })
+        #expect(lowRiskCheckpoints.contains { $0.nodeID == AgentPhase.selectTool.rawValue && $0.stateData != nil })
 
         try container.memoryService.save(content: "Temporary memory.", context: context)
         for try await event in container.agentRuntime.run(

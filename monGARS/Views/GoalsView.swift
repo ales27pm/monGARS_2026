@@ -138,7 +138,13 @@ struct GoalsView: View {
     private func resume(_ run: AgentRunRecord) {
         Task {
             do {
-                for try await _ in container.agentRuntime.resume(run: run, provider: container.llmProvider(), context: modelContext) {}
+                let options = AgentRuntimeOptions(
+                    autonomyLevel: container.settingsStore.autonomyLevel,
+                    maxSteps: run.maxSteps,
+                    timeoutSeconds: 45,
+                    networkToolsEnabled: container.settingsStore.remoteProviderEnabled
+                )
+                for try await _ in container.agentRuntime.resume(run: run, provider: container.llmProvider(), options: options, context: modelContext) {}
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription

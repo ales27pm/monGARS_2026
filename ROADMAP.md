@@ -3,7 +3,7 @@
 ## Near Term
 
 - Add editable conversation titles and message retry/regenerate controls.
-- Add richer memory editor UI for edit/export/forget-all service operations.
+- Add share-sheet export for memory/document exports.
 - Add UI tests once simulator execution is stable on the target machine.
 
 ## Mid Term
@@ -23,7 +23,10 @@
 ## Recently Completed
 
 - Added continuation-backed inline approval suspension in `AgentRuntime`.
+- Added routing coverage for memory-save intents and document-summary intents.
 - Added richer document retrieval with chunk ranking and highlighted matches.
 - Added live speech dictation into the Chat composer through `SpeechService`.
 - Added timeline and graph visualizations for the Diagnostics screen.
 - Added privacy-gated tools for native reminders/calendar with local fallback, Contacts lookup, weather, messages, phone, email, maps, integrated webview navigation, web fetch, and app-local file actions.
+- Added Settings-gated network access for remote provider calls and network-capable tools.
+- Added memory edit/export/forget-all UI in Memories.

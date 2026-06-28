@@ -18,8 +18,12 @@ monGARS is a native SwiftUI iOS assistant prototype with production-shaped bound
 - Provide context engineering through `ContextBuilder` with templates, local context composition, budget handling, truncation, and conversation summarization.
 - Provide a speech-ready abstraction using Apple Speech authorization with graceful unavailable/denied states.
 - Provide SwiftUI screens for chat, conversations, settings, memories, documents, goals/tasks, and diagnostics.
-- Provide unit tests covering memory search/deduplication, tool routing, graph checkpoints/resume, autonomous runtime, approval gates, context budget handling, provider fallback, and persistence models.
+- Provide unit tests covering memory search/deduplication, memory-save versus memory-lookup routing, document-summary routing, tool routing, graph checkpoints/resume, autonomous runtime, approval gates, network-disabled behavior, context budget handling, provider fallback, and persistence models.
 
 ## Privacy Objective
 
-The default app path makes no developer-backend network call. Remote provider mode requires the user to select the remote provider and enable the network toggle in Settings.
+The default app path makes no developer-backend network call. Remote provider mode requires the user to select the remote provider and enable the network toggle in Settings. Network-capable tools also require the Settings network toggle plus explicit user approval before they can run.
+
+## Current Verification Objective
+
+The current verified checkpoint is generic iPhoneOS arm64 compilation and unsigned Release archive with signing disabled, clean app/test compilation with `xcodebuild build-for-testing` against the explicit `monGARS Test iPhone` simulator UDID, manual launch on that iOS 26.3 simulator, and focused simulator execution of the autonomous demo test. The app shows a startup state and transitions to Chat. Full simulator test execution remains pending because local CoreSimulator/Xcode test workers shut the simulator down during broader runs.

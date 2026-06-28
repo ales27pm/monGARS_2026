@@ -32,8 +32,8 @@ struct AgentExecutor: Sendable {
         toolRouter.route(input: goal)
     }
 
-    func execute(goal: String, runID: UUID, autonomyLevel: AutonomyLevel, approved: Bool, context: ModelContext) async throws -> ToolResult? {
-        let request = ToolExecutionRequest(runID: runID, input: goal, autonomyLevel: autonomyLevel, approved: approved)
+    func execute(goal: String, runID: UUID, autonomyLevel: AutonomyLevel, approved: Bool, networkAccessAllowed: Bool, context: ModelContext) async throws -> ToolResult? {
+        let request = ToolExecutionRequest(runID: runID, input: goal, autonomyLevel: autonomyLevel, approved: approved, networkAccessAllowed: networkAccessAllowed)
         return try await toolRouter.execute(request: request, context: context)
     }
 }
@@ -379,7 +379,7 @@ struct AgentLoop: Sendable {
         }
     }
 
-    func resume(run: AgentRunRecord, provider: any LLMProvider, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
+    func resume(run: AgentRunRecord, provider: any LLMProvider, options: AgentRuntimeOptions? = nil, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -399,7 +399,7 @@ struct AgentLoop: Sendable {
                         conversationID: run.conversationID,
                         messages: [],
                         provider: provider,
-                        options: AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps),
+                        options: options ?? AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps),
                         context: context,
                         state: &state,
                         runRecord: run,
@@ -475,7 +475,7 @@ struct AgentLoop: Sendable {
             }
 
             _ = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .executeTool, selectedToolName: tool.name, selectedToolSchema: tool.schema, budget: provider.capabilities.maxContextTokens)
-            let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, context: context)
+            let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, networkAccessAllowed: options.networkToolsEnabled, context: context)
             if let result {
                 state.toolResults.append(result.output)
                 telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
@@ -569,7 +569,7 @@ struct AgentLoop: Sendable {
             state.completedNodeIDs.append(phase.rawValue)
         }
         telemetryBuffer.appendTrace(runID: state.runID, stepIndex: state.stepIndex, phase: phase.rawValue, message: text)
-        try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: false)
+        try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: true)
         continuation.yield(.status(runID: state.runID, phase: phase, message: phase.statusText))
         continuation.yield(.trace(runID: state.runID, phase: phase, message: text))
     }
@@ -702,6 +702,11 @@ struct AgentLoop: Sendable {
     ) {
         runRecord.statusRawValue = status.rawValue
         runRecord.lastError = error(for: status).localizedDescription
+        if status == .paused {
+            runRecord.completedAt = nil
+        } else {
+            runRecord.completedAt = .now
+        }
         runRecord.updatedAt = .now
         try? recordCheckpoint(state: state, nodeID: status.rawValue, context: context, includeStateData: true)
         try? telemetryBuffer.flush(runID: state.runID, to: context)
@@ -746,20 +751,37 @@ final class AgentRuntime {
         loop.run(goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context)
     }
 
-    func resume(run: AgentRunRecord, provider: any LLMProvider, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
-        loop.resume(run: run, provider: provider, context: context)
+    func resume(run: AgentRunRecord, provider: any LLMProvider, options: AgentRuntimeOptions? = nil, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
+        loop.resume(run: run, provider: provider, options: options, context: context)
     }
 
     func pause(run: AgentRunRecord, context: ModelContext) throws {
+        try telemetryBuffer.flush(runID: run.id, to: context)
         run.statusRawValue = AgentRunStatus.paused.rawValue
+        run.requiresApproval = false
         run.updatedAt = .now
+        context.insert(AgentTraceRecord(
+            runID: run.id,
+            stepIndex: run.currentStep,
+            phase: run.currentPhase,
+            message: "Run paused by user."
+        ))
+        context.insert(AgentCheckpointRecord(
+            runID: run.id,
+            nodeID: AgentRunStatus.paused.rawValue,
+            stateSummary: "Paused at \(run.currentPhase) step \(run.currentStep)."
+        ))
         try context.safeSave()
     }
 
     func cancel(run: AgentRunRecord, context: ModelContext) throws {
         runningTasks[run.id]?.cancel()
         runningTasks[run.id] = nil
+        try telemetryBuffer.flush(runID: run.id, to: context)
         run.statusRawValue = AgentRunStatus.cancelled.rawValue
+        run.requiresApproval = false
+        run.lastError = AgentRuntimeError.cancelled.localizedDescription
+        run.completedAt = .now
         run.updatedAt = .now
         Task { await approvalGate.cancel(runID: run.id) }
         let pendingApprovals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { $0.runID == run.id && $0.approved == nil }
@@ -768,6 +790,17 @@ final class AgentRuntime {
             approval.resolvedAt = .now
             Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
         }
+        context.insert(AgentTraceRecord(
+            runID: run.id,
+            stepIndex: run.currentStep,
+            phase: run.currentPhase,
+            message: "Run cancelled by user."
+        ))
+        context.insert(AgentCheckpointRecord(
+            runID: run.id,
+            nodeID: AgentRunStatus.cancelled.rawValue,
+            stateSummary: "Cancelled at \(run.currentPhase) step \(run.currentStep)."
+        ))
         try context.safeSave()
     }
 

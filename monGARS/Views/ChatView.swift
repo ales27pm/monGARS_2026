@@ -257,7 +257,8 @@ struct ChatView: View {
                 let options = AgentRuntimeOptions(
                     autonomyLevel: container.settingsStore.autonomyLevel,
                     maxSteps: 12,
-                    timeoutSeconds: 45
+                    timeoutSeconds: 45,
+                    networkToolsEnabled: container.settingsStore.remoteProviderEnabled
                 )
 
                 for try await event in container.agentRuntime.run(goal: text, conversationID: conversation.id, messages: history, provider: container.llmProvider(), options: options, context: modelContext) {

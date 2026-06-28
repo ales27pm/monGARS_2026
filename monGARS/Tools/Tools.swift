@@ -76,6 +76,16 @@ private func requirePrivacyApproval(_ request: ToolExecutionRequest, toolName: S
     }
 }
 
+private func networkDisabledResult(toolName: String, riskLevel: ToolRiskLevel) -> ToolResult {
+    ToolResult(
+        toolName: toolName,
+        output: "Network tools are disabled in Settings. Enable network access before running this tool.",
+        riskLevel: riskLevel,
+        requiresApproval: true,
+        approved: true
+    )
+}
+
 private func cleanedInput(_ input: String, removing phrases: [String]) -> String {
     var cleaned = input
     for phrase in phrases.sorted(by: { $0.count > $1.count }) where !phrase.isEmpty {
@@ -402,6 +412,9 @@ struct WeatherTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
+        guard request.networkAccessAllowed else {
+            return networkDisabledResult(toolName: name, riskLevel: riskLevel)
+        }
         let location = cleanedInput(request.input, removing: ["weather in", "weather for", "weather", "forecast in", "forecast for", "forecast"])
         guard !location.isEmpty,
               let encoded = location.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
@@ -525,6 +538,9 @@ struct WebViewTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
+        guard request.networkAccessAllowed else {
+            return networkDisabledResult(toolName: name, riskLevel: riskLevel)
+        }
         guard let url = firstHTTPURL(in: request.input) else {
             return ToolResult(toolName: name, output: "Provide an http or https URL for the integrated web view.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
@@ -548,6 +564,9 @@ struct WebFetchTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
+        guard request.networkAccessAllowed else {
+            return networkDisabledResult(toolName: name, riskLevel: riskLevel)
+        }
         guard let url = firstHTTPURL(in: request.input) else {
             return ToolResult(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
@@ -760,13 +779,20 @@ struct MemorySaveTool: Tool {
 
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
-        return lower.contains("remember that") || lower.contains("save memory") || lower.contains("remember key points")
+        return lower.contains("remember that")
+            || lower.contains("save memory")
+            || lower.contains("save this memory")
+            || lower.contains("remember key points")
+            || lower.contains("remember the key points")
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         let content = request.input
             .replacingOccurrences(of: "remember that", with: "", options: .caseInsensitive)
             .replacingOccurrences(of: "save memory", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "save this memory", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "remember the key points", with: "key points", options: .caseInsensitive)
+            .replacingOccurrences(of: "remember key points", with: "key points", options: .caseInsensitive)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try memoryService.save(content: content.isEmpty ? request.input : content, source: "agent", scope: "longTerm", context: context)
         return ToolResult(toolName: name, output: "Saved a local memory.")
@@ -921,6 +947,9 @@ struct RemoteNetworkTool: Tool {
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         guard request.approved else {
             throw AgentRuntimeError.approvalRequired(name)
+        }
+        guard request.networkAccessAllowed else {
+            return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
         return ToolResult(toolName: name, output: "Remote/network tools are stubbed and disabled by default.", riskLevel: riskLevel, requiresApproval: true, approved: request.approved)
     }

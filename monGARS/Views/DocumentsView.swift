@@ -62,7 +62,7 @@ struct DocumentsView: View {
         }
         .padding()
         .navigationTitle("Documents")
-        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.plainText, .text], allowsMultipleSelection: false) { result in
+        .fileImporter(isPresented: $isImporting, allowedContentTypes: supportedDocumentTypes, allowsMultipleSelection: false) { result in
             do {
                 guard let url = try result.get().first else { return }
                 try container.documentService.importDocument(url: url, context: modelContext)
@@ -70,6 +70,15 @@ struct DocumentsView: View {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private var supportedDocumentTypes: [UTType] {
+        [
+            .plainText,
+            .text,
+            UTType(filenameExtension: "md") ?? .plainText,
+            UTType(filenameExtension: "markdown") ?? .plainText
+        ]
     }
 
     private func search() {

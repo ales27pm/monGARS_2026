@@ -15,7 +15,9 @@ Open `monGARS.xcodeproj` in Xcode and run the `monGARS` scheme on an iOS Simulat
 Command-line build:
 
 ```sh
-xcodebuild -project monGARS.xcodeproj -scheme monGARS -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
+xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destination 'id=<SIMULATOR_ID>'
+xcodebuild build -project monGARS.xcodeproj -scheme monGARS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+xcodebuild archive -project monGARS.xcodeproj -scheme monGARS -configuration Release -destination 'generic/platform=iOS' -archivePath /tmp/monGARS-Unsigned.xcarchive CODE_SIGNING_ALLOWED=NO
 ```
 
 ## Test
@@ -23,7 +25,7 @@ xcodebuild -project monGARS.xcodeproj -scheme monGARS -destination 'generic/plat
 Compile app and unit tests:
 
 ```sh
-xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO
+xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destination 'id=<SIMULATOR_ID>'
 ```
 
 Run tests:
@@ -34,9 +36,21 @@ xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platfor
 
 Current verification on this machine:
 
-- App build succeeded for generic iOS Simulator.
-- Test build succeeded for generic iOS Simulator.
-- Actual simulator boot/test execution still stalls at CoreSimulator "Waiting on System App", so the verified checkpoint is app/test compilation rather than completed runtime execution.
+- App and test compilation succeeded with `build-for-testing` against the explicit `monGARS Test iPhone` simulator UDID. A shared `monGARS` scheme is checked in so Xcode no longer relies on auto-generated scheme settings for CLI builds.
+- Generic iPhoneOS arm64 compilation succeeded with signing disabled, validating the iOS 18 device build path independently of simulator execution.
+- Unsigned Release archive succeeded at `/tmp/monGARS-Unsigned.xcarchive`; the archive contains `monGARS.app`, dSYMs, bundle id `app.27pm.monGARS`, version `1.0`, and build `202606271944`.
+- Manual simulator launch succeeded on the `monGARS Test iPhone` iOS 26.3 simulator. The app shows a visible startup state, then transitions to Chat.
+- Focused simulator execution of `autonomousRuntimeCompletesAndPersistsTrace` succeeded with `xcodebuild test-without-building`, proving the core document-summary plus memory-save runtime path in XCTest.
+- Full and multi-test simulator execution remain unreliable on this machine: after long waits, CoreSimulator shuts the device down and Xcode reports `** BUILD INTERRUPTED **`. A fresh iOS 18.6 simulator also stalled during first-boot LaunchServices migration.
+
+## Demo Flow
+
+1. Open Settings and use `Mock Local` or Foundation Models with mock fallback for local-only behavior.
+2. Keep `Enable network provider and tools` off unless testing remote/web behavior intentionally.
+3. Import a UTF-8 text or Markdown document from Documents.
+4. In Chat, ask: `summarize my imported document and remember the key points`.
+5. Confirm the assistant summarizes imported document content, saves a durable memory, and shows agent trace rows under the assistant response.
+6. Inspect, edit, export, delete, or forget memories from Memories.
 
 ## Project Structure
 
@@ -54,7 +68,7 @@ Current verification on this machine:
 
 ## Privacy Defaults
 
-The default provider mode is Foundation Models with local mock fallback. Remote mode does not make network requests unless the user selects Remote Endpoint and enables the network toggle in Settings.
+The default provider mode is Foundation Models with local mock fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, web fetch, integrated web navigation, and the remote/network placeholder, also remain disabled unless the same Settings toggle is enabled, and still require approval before running.
 
 ## Autonomous Agent Loop
 
@@ -70,3 +84,11 @@ Chat requests now run through `AgentRuntime`:
 8. save durable memory when requested
 
 Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoints. Risky/destructive/external actions create approval requests visible in Goals.
+
+## Remaining Limitations
+
+- Full XCTest execution is currently blocked by local CoreSimulator/Xcode test-runner instability; focused runtime tests can pass.
+- Signed archive export/upload has not been run from this checkout.
+- Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
+- Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
+- Remote provider authentication profiles and richer calendar/reminder parsing are future work.

@@ -32,12 +32,12 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Remote Endpoint") {
-                Toggle("Enable network provider", isOn: remoteProviderEnabled)
+            Section("Network Access") {
+                Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 TextField("Endpoint", text: remoteEndpoint)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Text("Remote calls are disabled unless the toggle is on. Mock and Foundation modes make no developer-backend network requests.")
+                Text("Remote provider calls, web fetches, weather lookups, and in-app web navigation are disabled unless this toggle is on. Mock and Foundation modes make no developer-backend network requests.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

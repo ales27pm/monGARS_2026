@@ -78,12 +78,14 @@ struct ToolExecutionRequest: Sendable {
     var input: String
     var autonomyLevel: AutonomyLevel
     var approved: Bool
+    var networkAccessAllowed: Bool = false
 }
 
 struct AgentRuntimeOptions: Sendable {
     var autonomyLevel: AutonomyLevel = .assisted
     var maxSteps: Int = 12
     var timeoutSeconds: TimeInterval = 45
+    var networkToolsEnabled: Bool = false
 }
 
 struct AgentPlan: Sendable, Codable {
