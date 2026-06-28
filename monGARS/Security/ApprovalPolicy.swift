@@ -1,22 +1,35 @@
 import CryptoKit
 import Foundation
 
+enum ApprovalPolicy {
+    static let defaultRiskLevel: ToolRiskLevel = .high
+    static let defaultExpirationInterval: TimeInterval = 5 * 60
+
+    static func expirationDate(from createdAt: Date = .now) -> Date {
+        createdAt.addingTimeInterval(defaultExpirationInterval)
+    }
+
+    static func normalizedRisk(_ rawValue: String) -> ToolRiskLevel {
+        ToolRiskLevel(rawValue: rawValue) ?? defaultRiskLevel
+    }
+}
+
 struct ApprovalTuple: Sendable, Codable, Equatable {
-    var toolName: String
-    var target: String?
-    var normalizedArgumentsJSON: String
-    var payloadHash: String
-    var riskLevel: ToolRiskLevel
-    var expiresAt: Date
-    var sessionID: UUID
-    var userVisibleDiff: String
+    let toolName: String
+    let target: String?
+    let normalizedArgumentsJSON: String
+    let payloadHash: String
+    let riskLevel: ToolRiskLevel
+    let expiresAt: Date
+    let sessionID: UUID
+    let userVisibleDiff: String
 
     init(
         toolName: String,
         target: String?,
         normalizedArgumentsJSON: String,
         riskLevel: ToolRiskLevel,
-        expiresAt: Date = Date().addingTimeInterval(5 * 60),
+        expiresAt: Date = ApprovalPolicy.expirationDate(),
         sessionID: UUID,
         userVisibleDiff: String
     ) {
@@ -61,14 +74,14 @@ struct ApprovalTuple: Sendable, Codable, Equatable {
 
 enum ApprovalTupleHasher {
     static func payloadHash(toolName: String, target: String?, normalizedArgumentsJSON: String, riskLevel: String, sessionID: UUID) -> String {
-        let canonical = [
-            "risk_level=\(riskLevel)",
-            "session_id=\(sessionID.uuidString)",
-            "target=\(target ?? "")",
-            "tool_name=\(toolName)",
-            "normalized_arguments=\(normalizedJSON(normalizedArgumentsJSON))"
-        ].joined(separator: "\n")
-        return hashCanonical(canonical)
+        let payload: [String: Any] = [
+            "normalized_arguments": normalizedJSONObject(from: normalizedArgumentsJSON),
+            "risk_level": ApprovalPolicy.normalizedRisk(riskLevel).rawValue,
+            "session_id": sessionID.uuidString,
+            "target": target.map { $0 as Any } ?? NSNull(),
+            "tool_name": toolName
+        ]
+        return hashCanonical(canonicalJSONString(payload))
     }
 
     static func hashCanonical(_ canonical: String) -> String {
@@ -79,35 +92,39 @@ enum ApprovalTupleHasher {
     static func normalizedJSON(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "{}" }
-        guard let data = trimmed.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              JSONSerialization.isValidJSONObject(object),
-              let canonicalData = try? JSONSerialization.data(withJSONObject: canonicalObject(object), options: [.sortedKeys]),
-              let canonical = String(data: canonicalData, encoding: .utf8) else {
-            return trimmed
-        }
-        return canonical
+        return normalizedJSONObject(from: trimmed).mapToCanonicalJSONString(fallback: trimmed)
     }
 
     static func normalizedArguments(toolName: String, input: String, target: String?) -> String {
         canonicalJSONString([
             "input": input,
-            "target": target ?? "",
+            "target": target.map { $0 as Any } ?? NSNull(),
             "tool_name": toolName
         ])
     }
 
-    static func canonicalJSONString(_ dictionary: [String: String]) -> String {
-        let canonical = dictionary.keys.sorted().map { key in
-            "\"\(escape(key))\":\"\(escape(dictionary[key] ?? ""))\""
-        }.joined(separator: ",")
-        return "{\(canonical)}"
+    static func canonicalJSONString(_ dictionary: [String: Any]) -> String {
+        canonicalObject(dictionary).mapToCanonicalJSONString(fallback: "{}")
+    }
+
+    private static func normalizedJSONObject(from text: String) -> Any {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(object) else {
+            return trimmed
+        }
+        return canonicalObject(object)
     }
 
     private static func canonicalObject(_ object: Any) -> Any {
         if let dictionary = object as? [String: Any] {
             return dictionary.keys.sorted().reduce(into: [String: Any]()) { result, key in
-                result[key] = canonicalObject(dictionary[key] as Any)
+                if let value = dictionary[key] {
+                    result[key] = canonicalObject(value)
+                } else {
+                    result[key] = NSNull()
+                }
             }
         }
         if let array = object as? [Any] {
@@ -125,9 +142,26 @@ enum ApprovalTupleHasher {
             case "\n": escaped += "\\n"
             case "\r": escaped += "\\r"
             case "\t": escaped += "\\t"
-            default: escaped.unicodeScalars.append(scalar)
+            case let value where value.value < 0x20:
+                escaped += String(format: "\\u%04x", value.value)
+            default:
+                escaped.unicodeScalars.append(scalar)
             }
         }
         return escaped
+    }
+}
+
+private extension Any {
+    func mapToCanonicalJSONString(fallback: String) -> String {
+        if JSONSerialization.isValidJSONObject(self),
+           let data = try? JSONSerialization.data(withJSONObject: self, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        if let string = self as? String {
+            return string
+        }
+        return fallback
     }
 }
