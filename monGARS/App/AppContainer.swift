@@ -8,6 +8,7 @@ final class AppContainer {
     let settingsStore: SettingsStore
     let memoryService: MemoryService
     let documentService: DocumentService
+    let repoSelfModelService: RepoSelfModelService
     let toolRegistry: ToolRegistry
     let toolRouter: ToolRouter
     let agentGraph: AgentGraph
@@ -26,6 +27,7 @@ final class AppContainer {
         settingsStore = SettingsStore()
         memoryService = MemoryService()
         documentService = DocumentService()
+        repoSelfModelService = RepoSelfModelService()
         toolRegistry = ToolRegistry.defaultRegistry(memoryService: memoryService, documentService: documentService)
         toolRouter = ToolRouter(registry: toolRegistry)
         speechService = AppleSpeechService()
@@ -51,7 +53,9 @@ final class AppContainer {
         AgentTraceRecord.self,
         ToolCallRecord.self,
         ApprovalRequestRecord.self,
-        AgentTaskRecord.self
+        AgentTaskRecord.self,
+        RepoIndexRecord.self,
+        RepoSymbolRecord.self
     ]
 
     func llmProvider() -> any LLMProvider {
