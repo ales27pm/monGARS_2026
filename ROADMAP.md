@@ -2,6 +2,8 @@
 
 ## Near Term
 
+- Wire the scored route decision into the live `AgentRuntime` execution path once compatibility coverage for every existing route is green.
+- Add SourceKit-LSP/SwiftSyntax adapters behind the existing `RepoSymbolGraphBuilder` seam for higher-fidelity symbol relationships.
 - Add editable conversation titles and message retry/regenerate controls.
 - Add share-sheet export for memory/document exports.
 - Add UI tests once simulator execution is stable on the target machine.
@@ -23,6 +25,10 @@
 
 ## Recently Completed
 
+- Added immutable approval tuple storage with target, normalized arguments, payload hash, risk level, expiry, session id, and user-visible diff.
+- Added Goals approval cards that expose approval tuple metadata and block expired approvals from UI approval.
+- Added scored route decisions with calibrated confidence, evidence, risk, approval requirement, ambiguity checks, and abstention.
+- Added repo self-model SwiftData records and a deterministic symbol graph builder with commit/file/line provenance and privacy levels.
 - Added continuation-backed inline approval suspension in `AgentRuntime`.
 - Added routing coverage for memory-save intents and document-summary intents.
 - Added richer document retrieval with chunk ranking and highlighted matches.
