@@ -1250,6 +1250,7 @@ struct MonGARSTests {
     @Test func diagnosticsRedactionRemovesBodiesContactDetailsAndSecrets() throws {
         let raw = """
         Prepared approved SMS handoff: sms:15551234567&body=meet at 9.
+        Prepared approved phone handoff: tel://15551234567.
         Prepared approved email handoff: mailto:sam@example.com?body=private email body.
         Authorization: Bearer secret-token X-API-Key: abc123 phone +1 (555) 123-4567
         \(String(repeating: "document text ", count: 80))
@@ -1259,6 +1260,7 @@ struct MonGARSTests {
 
         #expect(!redacted.contains("meet at 9"))
         #expect(!redacted.contains("private email body"))
+        #expect(!redacted.contains("15551234567"))
         #expect(!redacted.contains("sam@example.com"))
         #expect(!redacted.contains("secret-token"))
         #expect(!redacted.contains("abc123"))
@@ -1272,7 +1274,12 @@ struct MonGARSTests {
         Build: 202606280328
         Delivery UUID: 2d684a6f-5843-4145-93d4-6916f131f9ab
         Coordinate: 45.50170, -73.56730
+        Localhost: 127.0.0.1
+        Maps: https://maps.apple.com?ll=37.3346438,-122.0089878&q=Apple%20Park
         Phone: +1 (555) 123-4567
+        Next section has digits:
+        Timeout seconds: 20
+        Retries: 2
         """
 
         let redacted = DiagnosticsRedactor.redact(raw, maxLength: 1_000)
@@ -1281,6 +1288,8 @@ struct MonGARSTests {
         #expect(redacted.contains("202606280328"))
         #expect(redacted.contains("2d684a6f-5843-4145-93d4-6916f131f9ab"))
         #expect(redacted.contains("45.50170, -73.56730"))
+        #expect(redacted.contains("127.0.0.1"))
+        #expect(redacted.contains("37.3346438,-122.0089878"))
         #expect(!redacted.contains("+1 (555) 123-4567"))
         #expect(redacted.contains("[PHONE REDACTED]"))
     }

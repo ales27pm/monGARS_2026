@@ -45,13 +45,18 @@ enum DiagnosticsRedactor {
     }
 
     private static func redactPhoneNumbers(in text: String) -> String {
-        let plusPrefixed = text.replacingOccurrences(
+        let schemeRedacted = text.replacingOccurrences(
+            of: #"(?i)\b(sms|tel|telprompt):/{0,2}\+?\d{7,15}\b"#,
+            with: "$1:[PHONE REDACTED]",
+            options: .regularExpression
+        )
+        let plusPrefixed = schemeRedacted.replacingOccurrences(
             of: #"(?<![\w-])\+\d{7,15}(?![\w-])"#,
             with: "[PHONE REDACTED]",
             options: .regularExpression
         )
         return plusPrefixed.replacingOccurrences(
-            of: #"(?<![\w-])\+?\d(?=[\d\s\-\(\)\.]*[\s\-\(\)\.])[\d\s\-\(\)\.]{6,}\d(?![\w-])"#,
+            of: #"(?<![\w.-])\+?\d(?=[\d \t\-\(\)]*[- \t\(\)])[\d \t\-\(\)]{6,}\d(?![\w.-])"#,
             with: "[PHONE REDACTED]",
             options: .regularExpression
         )

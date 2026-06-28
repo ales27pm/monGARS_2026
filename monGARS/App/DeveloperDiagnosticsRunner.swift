@@ -159,7 +159,7 @@ enum DeveloperDiagnosticsRunner {
             let document = DocumentRecord(title: "\(marker).md", content: "\(documentQuery) for real tool E2E.")
             context.insert(document)
             try container.documentService.rebuildChunks(for: document, context: context)
-            let search = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(documentQuery), context: context)
+            let search = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(marker), context: context)
             record("document search", search) { $0.output.contains(document.title) && $0.output.contains(marker) }
             let summary = try await DocumentSummaryTool(documentService: container.documentService).execute(request: approved("summarize my imported document"), context: context)
             record("document summary", summary) { !$0.output.contains("No documents") }
