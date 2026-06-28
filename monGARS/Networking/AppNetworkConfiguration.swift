@@ -26,6 +26,10 @@ enum AppNetworkConfiguration {
         ))
     }
 
+    static func networkPolicy() -> NetworkPolicy {
+        NetworkPolicy(allowsLocalNetworkHosts: UserDefaults.standard.bool(forKey: Keys.developerModeEnabled))
+    }
+
     static var remoteModel: String {
         let value = UserDefaults.standard.string(forKey: Keys.remoteModel) ?? "llama3.2"
         return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "llama3.2" : value

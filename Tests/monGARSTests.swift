@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import Testing
+import UniformTypeIdentifiers
 @testable import monGARS
 
 #if canImport(UIKit)
@@ -30,6 +31,10 @@ final class TestURLProtocol: URLProtocol {
             statusCode = 200
             contentType = "application/json"
             data = Data(#"{"ok":true}"#.utf8)
+        case "/redirect-private":
+            statusCode = 200
+            contentType = "application/json"
+            data = Data(#"{"redirected":true}"#.utf8)
         case "/down":
             statusCode = 503
             contentType = "application/json"
@@ -44,7 +49,8 @@ final class TestURLProtocol: URLProtocol {
             data = Data()
         }
 
-        guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": contentType]) else {
+        let responseURL = url.path == "/redirect-private" ? URL(string: "http://127.0.0.1/status")! : url
+        guard let response = HTTPURLResponse(url: responseURL, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": contentType]) else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
@@ -66,6 +72,21 @@ final class LockedString: @unchecked Sendable {
     }
 
     func set(_ value: String) {
+        lock.withLock {
+            storage = value
+        }
+    }
+}
+
+final class LockedUUID: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: UUID?
+
+    var value: UUID? {
+        lock.withLock { storage }
+    }
+
+    func set(_ value: UUID) {
         lock.withLock {
             storage = value
         }
@@ -183,6 +204,24 @@ struct MonGARSTests {
         } catch NetworkClientError.blockedHost(let host) {
             #expect(host == "192.168.1.25")
         }
+    }
+
+    @Test func networkClientBlocksRedirectsToPrivateLAN() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
+        do {
+            _ = try await client.send(NetworkRequest(url: try #require(URL(string: "https://example.com/redirect-private"))))
+            #expect(Bool(false), "Redirect/final URLs to localhost should be blocked.")
+        } catch NetworkClientError.blockedHost(let host) {
+            #expect(host == "127.0.0.1")
+        }
+    }
+
+    @Test func documentsImporterSupportsPDFType() {
+        #expect(DocumentsView.supportedDocumentTypes.contains(.pdf))
     }
 
     @Test func networkClientStreamsLinesThroughConfiguredSession() async throws {
@@ -418,8 +457,77 @@ struct MonGARSTests {
             let request = ToolExecutionRequest(runID: UUID(), input: input, autonomyLevel: .auto, approved: true, networkAccessAllowed: false)
             let result = try await tool.execute(request: request, context: context)
             #expect(result.output.contains("Network tools are disabled in Settings"))
-            #expect(result.requiresApproval)
+            #expect(!result.requiresApproval)
         }
+    }
+
+    @Test func runtimeBlocksNetworkToolBeforeApprovalWhenNetworkDisabled() async throws {
+        let (container, context) = makeContext()
+        for try await _ in container.agentRuntime.run(
+            goal: "fetch https://example.com/status",
+            conversationID: nil,
+            messages: [],
+            provider: MockLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: false),
+            context: context
+        ) {}
+
+        let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>())
+        let calls = try context.fetch(FetchDescriptor<ToolCallRecord>())
+
+        #expect(approvals.isEmpty)
+        #expect(calls.first?.toolName == "web_fetch")
+        #expect(calls.first?.errorCategory == "network_disabled")
+        #expect(calls.first?.target?.contains("example.com") == true)
+    }
+
+    @Test func approvalReasonIncludesActionTargetAndNetworkRequirement() async throws {
+        let (container, context) = makeContext()
+        for try await event in container.agentRuntime.run(
+            goal: "fetch https://example.com/status",
+            conversationID: nil,
+            messages: [],
+            provider: MockLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: true),
+            context: context
+        ) {
+            if case .approvalRequired = event {
+                break
+            }
+        }
+
+        let approval = try #require(try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first)
+        #expect(approval.actionName == "web_fetch")
+        #expect(approval.reason.contains("Fetch and extract"))
+        #expect(approval.reason.contains("example.com"))
+        #expect(approval.reason.contains("Requires network access"))
+    }
+
+    @Test func webViewToolBlocksPrivateLANWhenDeveloperModeIsOff() async throws {
+        let previous = UserDefaults.standard.bool(forKey: AppNetworkConfiguration.Keys.developerModeEnabled)
+        UserDefaults.standard.set(false, forKey: AppNetworkConfiguration.Keys.developerModeEnabled)
+        defer { UserDefaults.standard.set(previous, forKey: AppNetworkConfiguration.Keys.developerModeEnabled) }
+
+        let (_, context) = makeContext()
+        let result = try await WebViewTool().execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "open webview http://localhost:8080", autonomyLevel: .assisted, approved: true, networkAccessAllowed: true),
+            context: context
+        )
+
+        #expect(result.errorCategory == "blocked_host")
+        #expect(result.output.contains("blocked"))
+        #expect(ToolHandoffAction.actions(from: "Approved in-app webview navigation prepared: http://localhost:8080.").isEmpty)
+    }
+
+    @Test func contactsLookupRejectsEmptyQueryBeforeEnumeration() async throws {
+        let (_, context) = makeContext()
+        let result = try await ContactsTool().execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "find contact", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        #expect(result.errorCategory == "invalid_arguments")
+        #expect(result.output.contains("non-empty contact"))
     }
 
     @Test func remoteNetworkToolIsRealAndRequiresURLWhenEnabled() async throws {
@@ -672,6 +780,45 @@ struct MonGARSTests {
         #expect(run.completedAt != nil)
     }
 
+    @Test func runtimeCancelStopsActiveProviderRun() async throws {
+        let (container, context) = makeContext()
+        let runIDBox = LockedUUID()
+        let streamTask = Task {
+            do {
+                for try await event in container.agentRuntime.run(
+                    goal: "write a slow local-only answer",
+                    conversationID: nil,
+                    messages: [],
+                    provider: SlowLLMProvider(),
+                    options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 30),
+                    context: context
+                ) {
+                    if case .status(let runID, _, _) = event {
+                        runIDBox.set(runID)
+                    }
+                }
+            } catch {
+                #expect(error.localizedDescription == AgentRuntimeError.cancelled.localizedDescription)
+            }
+        }
+
+        var run: AgentRunRecord?
+        for _ in 0..<100 {
+            if let runID = runIDBox.value,
+               let found = try context.fetch(FetchDescriptor<AgentRunRecord>()).first(where: { $0.id == runID }) {
+                run = found
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let activeRun = try #require(run)
+        try container.agentRuntime.cancel(run: activeRun, context: context)
+        _ = await streamTask.result
+
+        #expect(activeRun.statusRawValue == AgentRunStatus.cancelled.rawValue)
+        #expect(activeRun.lastError == AgentRuntimeError.cancelled.localizedDescription)
+    }
+
     @Test func pauseAndCancelPersistControlDiagnostics() throws {
         let (container, context) = makeContext()
         let runID = UUID()
@@ -781,6 +928,25 @@ struct MonGARSTests {
         #expect(runs.first?.statusRawValue == AgentRunStatus.failed.rawValue)
         #expect(toolCalls.isEmpty)
         #expect(completedResponse.contains("approval was rejected"))
+    }
+
+    @Test func networkOffPreflightBlocksBeforeApproval() async throws {
+        let (container, context) = makeContext()
+
+        for try await _ in container.agentRuntime.run(
+            goal: "fetch https://example.com",
+            conversationID: nil,
+            messages: [],
+            provider: MockLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: false),
+            context: context
+        ) {}
+
+        let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>())
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        #expect(approvals.isEmpty)
+        #expect(toolCalls.first?.toolName == "web_fetch")
+        #expect(toolCalls.first?.errorCategory == "network_disabled")
     }
 
     @Test func resumeWaitingForApprovalDoesNotDuplicateApproval() async throws {
@@ -1009,6 +1175,91 @@ struct MonGARSTests {
         #expect(afterFlush.first?.latencyMs == 42)
     }
 
+    @Test func diagnosticsRedactionRemovesBodiesContactDetailsAndSecrets() throws {
+        let raw = """
+        Prepared approved SMS handoff: sms:15551234567&body=meet at 9.
+        Prepared approved email handoff: mailto:sam@example.com?body=private email body.
+        Authorization: Bearer secret-token X-API-Key: abc123 phone +1 (555) 123-4567
+        \(String(repeating: "document text ", count: 80))
+        """
+
+        let redacted = DiagnosticsRedactor.redact(raw, maxLength: 260)
+
+        #expect(!redacted.contains("meet at 9"))
+        #expect(!redacted.contains("private email body"))
+        #expect(!redacted.contains("sam@example.com"))
+        #expect(!redacted.contains("secret-token"))
+        #expect(!redacted.contains("abc123"))
+        #expect(redacted.contains("[REDACTED]"))
+        #expect(redacted.contains("[TRUNCATED]"))
+    }
+
+    @Test func developerDiagnosticsReportCoversRuntimeChecksAndRedactsSecrets() async throws {
+        let (container, context) = makeContext()
+        container.settingsStore.remoteProviderEnabled = false
+        container.settingsStore.developerModeEnabled = false
+        container.settingsStore.remoteAPIKey = "super-secret-remote-key"
+        container.settingsStore.weatherAPIKey = "super-secret-weather-key"
+        container.settingsStore.remoteNetworkHeadersText = "Authorization: Bearer hidden-token\nX-Debug: yes"
+        context.insert(AgentRunRecord(goal: "email sam@example.com about +1 555 123 4567", statusRawValue: AgentRunStatus.failed.rawValue, currentPhase: AgentPhase.executeTool.rawValue))
+        context.insert(ToolCallRecord(
+            runID: UUID(),
+            toolName: "email_compose",
+            input: "mailto:sam@example.com?body=private message Authorization: Bearer hidden-token",
+            output: "Prepared approved email handoff: mailto:sam@example.com?body=private message",
+            riskLevel: ToolRiskLevel.high.rawValue,
+            requiresApproval: true,
+            approved: false,
+            target: "mailto:sam@example.com?body=private message",
+            errorCategory: "approval_rejected"
+        ))
+        try context.save()
+
+        let result = await DeveloperDiagnosticsRunner.run(container: container, context: context, writeReportFile: false)
+
+        #expect(result.text.contains("monGARS Developer Diagnostics Report"))
+        #expect(result.text.contains("Security Checks"))
+        #expect(result.text.contains("Real Tool E2E"))
+        #expect(result.text.contains("Provider mock usage: false"))
+        #expect(result.text.contains("Keychain round trip: pass"))
+        #expect(result.text.contains("SwiftData Counts"))
+        #expect(result.text.contains("Recent Diagnostics"))
+        #expect(result.text.contains("Localhost policy: blocked"))
+        #expect(result.text.contains("Remote API key configured: true"))
+        #expect(result.text.contains("Weather API key configured: true"))
+        #expect(!result.text.contains("super-secret-remote-key"))
+        #expect(!result.text.contains("super-secret-weather-key"))
+        #expect(!result.text.contains("hidden-token"))
+        #expect(!result.text.contains("sam@example.com"))
+        #expect(!result.text.contains("private message"))
+        #expect(!result.text.contains("+1 555 123 4567"))
+    }
+
+    @Test func telemetryToolCallPersistenceRedactsSecrets() throws {
+        let (_, context) = makeContext()
+        let buffer = AgentTelemetryBuffer()
+        let runID = UUID()
+        buffer.appendToolCall(
+            runID: runID,
+            input: "post https://example.com Authorization: Bearer secret-token body private payload",
+            result: ToolResult(
+                toolName: "remote_network",
+                output: "Prepared approved email handoff: mailto:sam@example.com?body=secret body",
+                riskLevel: .high,
+                requiresApproval: true,
+                approved: true,
+                target: "https://example.com/path?api_key=secret-token"
+            )
+        )
+        try buffer.flush(runID: runID, to: context)
+
+        let record = try #require(try context.fetch(FetchDescriptor<ToolCallRecord>()).first)
+        #expect(!record.input.contains("secret-token"))
+        #expect(!record.output.contains("secret body"))
+        #expect(record.output.contains("[REDACTED]"))
+        #expect(record.target?.contains("secret-token") == false)
+    }
+
     @Test func approvalGateCancelRunReleasesSuspendedApproval() async throws {
         let gate = AgentApprovalGate()
         let runID = UUID()
@@ -1110,5 +1361,19 @@ final class MockSpeechService: SpeechService, @unchecked Sendable {
 
     func stopTranscription() {
         stopCount += 1
+    }
+}
+
+struct SlowLLMProvider: LLMProvider {
+    let name = "Slow Test Provider"
+    let capabilities = LLMProviderCapabilities.mockLocal
+
+    var status: String {
+        get async { "Slow test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        try await Task.sleep(nanoseconds: 5_000_000_000)
+        return LLMResponse(text: "slow answer", providerName: name)
     }
 }

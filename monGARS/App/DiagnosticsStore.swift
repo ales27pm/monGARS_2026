@@ -11,11 +11,11 @@ final class DiagnosticsStore {
     func record(event: AgentEvent) {
         switch event {
         case .step(let name):
-            graphSteps.append(name)
+            graphSteps.append(DiagnosticsRedactor.redact(name, maxLength: 240))
         case .toolCall(let tool, let input, let output):
-            toolCalls.append("\(tool): \(input) -> \(output)")
+            toolCalls.append("\(tool): \(DiagnosticsRedactor.redact(input, maxLength: 240)) -> \(DiagnosticsRedactor.redact(output, maxLength: 320))")
         case .checkpoint(let checkpoint):
-            checkpoints.append("\(checkpoint.nodeID): \(checkpoint.summary)")
+            checkpoints.append("\(checkpoint.nodeID): \(DiagnosticsRedactor.redact(checkpoint.summary, maxLength: 240))")
         case .partialResponse:
             break
         }

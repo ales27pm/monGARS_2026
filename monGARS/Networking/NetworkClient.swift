@@ -21,6 +21,10 @@ struct NetworkClientConfiguration: Sendable {
     var allowsLocalNetworkHosts: Bool = false
 
     static let defaultProduction = NetworkClientConfiguration()
+
+    var policy: NetworkPolicy {
+        NetworkPolicy(allowsLocalNetworkHosts: allowsLocalNetworkHosts)
+    }
 }
 
 struct NetworkRequest: Sendable {
@@ -145,6 +149,7 @@ struct NetworkClient: Sendable {
                     }
 
                     let finalURL = http.url ?? request.url
+                    try validatePolicy(for: finalURL)
                     var receivedBytes = 0
                     for try await line in bytes.lines {
                         receivedBytes += line.utf8.count
@@ -170,12 +175,7 @@ struct NetworkClient: Sendable {
     }
 
     private func validatePolicy(for url: URL) throws {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            throw NetworkClientError.invalidScheme
-        }
-        if !configuration.allowsLocalNetworkHosts, let host = url.host?.lowercased(), isBlockedHost(host) {
-            throw NetworkClientError.blockedHost(host)
-        }
+        try configuration.policy.validate(url)
     }
 
     private func buildURLRequest(from request: NetworkRequest) -> URLRequest {
@@ -212,11 +212,14 @@ struct NetworkClient: Sendable {
             throw NetworkClientError.unacceptableContentType(contentType)
         }
 
-        let host = http.url?.host ?? request.url.host ?? "unknown"
+        let finalURL = http.url ?? request.url
+        try validatePolicy(for: finalURL)
+
+        let host = finalURL.host ?? request.url.host ?? "unknown"
         Self.logger.info("network request completed host=\(host, privacy: .public) method=\(request.method.rawValue, privacy: .public) status=\(http.statusCode, privacy: .public) latency_ms=\(latencyMs, privacy: .public)")
 
         return NetworkResponse(
-            finalURL: http.url ?? request.url,
+            finalURL: finalURL,
             statusCode: http.statusCode,
             contentType: contentType,
             data: data,
@@ -239,39 +242,6 @@ struct NetworkClient: Sendable {
             }
         }
         return false
-    }
-
-    private func isBlockedHost(_ host: String) -> Bool {
-        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
-        if normalized == "localhost" || normalized == "localhost." || normalized == "0.0.0.0" {
-            return true
-        }
-        if normalized.hasSuffix(".local") || normalized.hasSuffix(".localdomain") {
-            return true
-        }
-        if normalized == "::1" || normalized == "0:0:0:0:0:0:0:1" {
-            return true
-        }
-        if normalized.hasPrefix("fe80:") || normalized.hasPrefix("fc") || normalized.hasPrefix("fd") {
-            return true
-        }
-
-        let parts = normalized.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else {
-            return false
-        }
-        switch parts[0] {
-        case 10, 127:
-            return true
-        case 169:
-            return parts[1] == 254
-        case 172:
-            return (16...31).contains(parts[1])
-        case 192:
-            return parts[1] == 168
-        default:
-            return false
-        }
     }
 
     private static func latencyMilliseconds(_ duration: Duration) -> Double {

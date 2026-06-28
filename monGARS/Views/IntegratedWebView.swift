@@ -33,7 +33,9 @@ struct ToolHandoffAction: Identifiable, Equatable {
         }
         if text.localizedCaseInsensitiveContains("in-app webview"),
            let url = lastURL(in: text, schemes: ["http", "https"], excludingHostPrefix: "maps.apple.com") {
-            actions.append(ToolHandoffAction(label: "Open Web View", systemImage: "safari", url: url, destination: .integratedWebView))
+            if (try? AppNetworkConfiguration.networkPolicy().validate(url)) != nil {
+                actions.append(ToolHandoffAction(label: "Open Web View", systemImage: "safari", url: url, destination: .integratedWebView))
+            }
         }
 
         return actions
@@ -240,6 +242,27 @@ private struct WebKitView: UIViewRepresentable {
             state.isLoading = true
             state.errorMessage = nil
             state.estimatedProgress = webView.estimatedProgress
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.cancel)
+                return
+            }
+            do {
+                try AppNetworkConfiguration.networkPolicy().validate(url)
+                decisionHandler(.allow)
+            } catch NetworkClientError.blockedHost(let host) {
+                state.currentURL = url
+                state.isLoading = false
+                state.errorMessage = "Navigation to \(host) is blocked unless Developer Mode is on."
+                decisionHandler(.cancel)
+            } catch {
+                state.currentURL = url
+                state.isLoading = false
+                state.errorMessage = error.localizedDescription
+                decisionHandler(.cancel)
+            }
         }
 
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {

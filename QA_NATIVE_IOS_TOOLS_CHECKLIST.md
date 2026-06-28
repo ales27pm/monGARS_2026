@@ -2,6 +2,12 @@
 
 Use a real device for permission and handoff checks where possible. Keep Settings > Network off for the first pass.
 
+## Developer Real Tool E2E Report
+
+- Open Settings > Developer and tap `Run Real Tool E2E & Export Report`. Expected: report is generated under app-owned `AgentFiles/Reports`, can be shared, and includes app/build metadata, network policy, Keychain, framework availability, permission states, SwiftData counts, recent diagnostics, and direct production-tool E2E probes.
+- Inspect the report. Expected: no API keys, tokens, email addresses, phone numbers, SMS/email bodies, or contact dumps appear in clear text.
+- Confirm the report states that no `MockLLMProvider` is used and that in-app E2E is not XCTest execution. Expected: Xcode build/test evidence remains separate.
+
 ## Privacy Gates
 
 - With Network off, run weather, maps, web fetch, webview, and remote HTTP requests. Expected: blocked result with a clear network-disabled message and no request.

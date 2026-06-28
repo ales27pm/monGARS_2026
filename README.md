@@ -39,6 +39,7 @@ Current verification on this machine:
 - App and test compilation succeeded with `build-for-testing` against the explicit `monGARS Test iPhone` simulator UDID. A shared `monGARS` scheme is checked in so Xcode no longer relies on auto-generated scheme settings for CLI builds.
 - Generic iPhoneOS arm64 compilation succeeded with signing disabled, validating the iOS 18 device build path independently of simulator execution.
 - Unsigned Release archive succeeded at `/tmp/monGARS-Unsigned.xcarchive`; the archive contains `monGARS.app`, dSYMs, bundle id `app.27pm.monGARS`, version `1.0`, and build `202606271944`.
+- Current project build number in `CURRENT_PROJECT_VERSION` is `202606280033`. The App Store Connect upload noted below was an earlier signed upload, not proof that this current build number has been uploaded.
 - Manual simulator launch succeeded on the `monGARS Test iPhone` iOS 26.3 simulator. The app shows a visible startup state, then transitions to Chat.
 - Full simulator execution succeeded with `xcodebuild test-without-building` against `monGARS Test iPhone` after `build-for-testing`; 48 Swift Testing tests passed.
 
@@ -50,6 +51,7 @@ Current verification on this machine:
 4. In Chat, ask: `summarize my imported document and remember the key points`.
 5. Confirm the assistant summarizes imported document content, saves a durable memory, and shows agent trace rows under the assistant response.
 6. Inspect, edit, export, delete, or forget memories from Memories.
+7. For device-side QA without waiting on XCTest launch, open Settings > Developer and run `Run Real Tool E2E & Export Report`.
 
 ## Project Structure
 
@@ -71,6 +73,10 @@ Current verification on this machine:
 
 The default provider mode is Foundation Models with local fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. Localhost, `.local`, and private LAN hosts are blocked by the central `NetworkClient` unless Developer Mode is enabled in Settings. API keys are stored in Keychain, not UserDefaults.
 
+## Developer Real Tool E2E
+
+Settings > Developer includes `Run Real Tool E2E & Export Report`. The button invokes production tool implementations directly without `MockLLMProvider`, using temporary `monGARS E2E` inputs where mutation is required. It covers local tools, memory, documents, conversation search, tasks, sandboxed files, handoffs, Apple permission-backed tools, network-gated tools, network policy, Keychain round trip, framework availability, SwiftData counts, and recent redacted diagnostics. It writes a text report under the app-owned `AgentFiles/Reports` directory and exposes it through the system share sheet. It does not run XCTest inside the app; use `xcodebuild build-for-testing` and `xcodebuild test-without-building` for compiler/unit-test proof.
+
 ## Autonomous Agent Loop
 
 Chat requests now run through `AgentRuntime`:
@@ -89,7 +95,7 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 ## Remaining Limitations
 
 - Full XCTest execution currently passes on the `monGARS Test iPhone` simulator when run without rebuilding after `build-for-testing`.
-- Signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`.
+- Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. Current project build number is `202606280033`.
 - Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
 - Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
 - Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.

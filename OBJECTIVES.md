@@ -18,6 +18,7 @@ monGARS is a native SwiftUI iOS assistant prototype with production-shaped bound
 - Provide context engineering through `ContextBuilder` with templates, local context composition, budget handling, truncation, and conversation summarization.
 - Provide a speech-ready abstraction using Apple Speech authorization with graceful unavailable/denied states.
 - Provide SwiftUI screens for chat, conversations, settings, memories, documents, goals/tasks, and diagnostics.
+- Provide a Settings > Developer one-button real-tool E2E report that invokes production tool implementations without `MockLLMProvider`, honors privacy/network gates, redacts sensitive values, writes an app-owned report file, and exports through the iOS share sheet.
 - Provide unit tests covering memory search/deduplication, memory-save versus memory-lookup routing, document-summary routing, tool routing, graph checkpoints/resume, autonomous runtime, approval gates, network-disabled behavior, private-LAN blocking, HTML/PDF extraction, Keychain persistence, local-file traversal rejection, context budget handling, provider fallback, and persistence models.
 
 ## Privacy Objective
@@ -26,4 +27,4 @@ The default app path makes no developer-backend network call. Remote provider mo
 
 ## Current Verification Objective
 
-The current verified checkpoint is clean app/test compilation with `xcodebuild build-for-testing` against the explicit `monGARS Test iPhone` simulator, followed by a full `xcodebuild test-without-building` simulator run with 48 passing Swift Testing tests. Previous release validation also produced a signed App Store Connect upload for build `202606272226`.
+The current verified checkpoint is clean app/test compilation with `xcodebuild build-for-testing` against the explicit `monGARS Test iPhone` simulator, followed by a full `xcodebuild test-without-building` simulator run with 48 passing Swift Testing tests. Previous release validation also produced a signed App Store Connect upload for build `202606272226`; that upload predates the current project build number, `202606280033`.

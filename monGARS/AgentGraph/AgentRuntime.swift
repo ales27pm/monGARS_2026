@@ -173,7 +173,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
     }
 
     func appendTrace(runID: UUID, stepIndex: Int, phase: String, message: String, toolName: String? = nil, latencyMs: Double = 0) {
-        let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: message, toolName: toolName, latencyMs: latencyMs, createdAt: .now)
+        let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: DiagnosticsRedactor.redact(message, maxLength: 600), toolName: toolName, latencyMs: latencyMs, createdAt: .now)
         lock.withLock {
             if let inMemoryContext {
                 inMemoryContext.insert(AgentTraceRecord(
@@ -192,7 +192,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
     }
 
     func appendCheckpoint(runID: UUID, nodeID: String, stateSummary: String, stateData: Data? = nil) {
-        let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: stateSummary, stateData: stateData, createdAt: .now)
+        let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: DiagnosticsRedactor.redact(stateSummary, maxLength: 360), stateData: stateData, createdAt: .now)
         lock.withLock {
             if let inMemoryContext {
                 inMemoryContext.insert(AgentCheckpointRecord(
@@ -212,12 +212,12 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         let snapshot = ToolCallSnapshot(
             runID: runID,
             toolName: result.toolName,
-            input: input,
-            output: result.output,
+            input: DiagnosticsRedactor.redact(input, maxLength: 500),
+            output: DiagnosticsRedactor.redact(result.output, maxLength: 700),
             riskLevel: result.riskLevel.rawValue,
             requiresApproval: result.requiresApproval,
             approved: result.approved,
-            target: result.target,
+            target: DiagnosticsRedactor.redactOptional(result.target, maxLength: 160),
             statusCode: result.statusCode,
             latencyMs: result.latencyMs ?? 0,
             errorCategory: result.errorCategory,
@@ -367,6 +367,7 @@ struct AgentLoop: Sendable {
     let telemetryBuffer: AgentTelemetryBuffer
 
     func run(
+        runID: UUID = UUID(),
         goal: String,
         conversationID: UUID?,
         messages: [String],
@@ -375,9 +376,9 @@ struct AgentLoop: Sendable {
         context: ModelContext
     ) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task { @MainActor in
+            let task = Task { @MainActor in
                 let startedAt = Date()
-                var state = AgentLoopState(runID: UUID(), goal: goal)
+                var state = AgentLoopState(runID: runID, goal: goal)
                 let runRecord = AgentRunRecord(id: state.runID, conversationID: conversationID, goal: goal, autonomyLevelRawValue: options.autonomyLevel.rawValue, maxSteps: options.maxSteps)
 
                 do {
@@ -405,12 +406,15 @@ struct AgentLoop: Sendable {
                     }
                 }
             }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
         }
     }
 
     func resume(run: AgentRunRecord, provider: any LLMProvider, options: AgentRuntimeOptions? = nil, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task { @MainActor in
+            let task = Task { @MainActor in
                 do {
                     let descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
                     let checkpoint = try context.fetch(descriptor).first { $0.runID == run.id && $0.stateData != nil }
@@ -438,6 +442,9 @@ struct AgentLoop: Sendable {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }
@@ -485,38 +492,53 @@ struct AgentLoop: Sendable {
         }
 
         if let tool, needsPhase(.executeTool, state: state) {
-            if requiresApproval(tool: tool, autonomyLevel: options.autonomyLevel) {
-                let decision = try await requestApprovalIfNeeded(tool: tool, goal: goal, options: options, state: &state, runRecord: runRecord, context: context, continuation: continuation)
-                guard decision == .approved else {
-                    state.status = .failed
-                    state.finalResponse = "I did not run \(tool.name) because approval was rejected."
-                    runRecord.statusRawValue = state.status.rawValue
-                    runRecord.lastError = AgentRuntimeError.approvalRejected(tool.name).localizedDescription
-                    runRecord.summary = state.finalResponse
-                    runRecord.completedAt = .now
-                    runRecord.updatedAt = .now
-                    try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
-                    try telemetryBuffer.flush(runID: state.runID, to: context)
-                    continuation.yield(.completed(runID: state.runID, response: state.finalResponse))
-                    continuation.finish()
-                    return
-                }
-            }
-
-            _ = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .executeTool, selectedToolName: tool.name, selectedToolSchema: tool.schema, budget: provider.capabilities.maxContextTokens)
-            let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, networkAccessAllowed: options.networkToolsEnabled, context: context)
-            if let result {
+            let metadata = tool.metadata(for: goal)
+            if metadata.requiresNetwork && !options.networkToolsEnabled {
+                let result = ToolResult.networkDisabled(toolName: tool.name, riskLevel: tool.riskLevel, target: metadata.targetPreview)
                 state.toolResults.append(result.output)
                 telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
-            }
-            try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                result?.output ?? "Tool produced no output."
-            }
+                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                    result.output
+                }
+                let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
+                state.observations.append(observation)
+                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                    observation
+                }
+            } else {
+                if requiresApproval(tool: tool, autonomyLevel: options.autonomyLevel) {
+                    let decision = try await requestApprovalIfNeeded(tool: tool, goal: goal, options: options, state: &state, runRecord: runRecord, context: context, continuation: continuation)
+                    guard decision == .approved else {
+                        state.status = .failed
+                        state.finalResponse = "I did not run \(tool.name) because approval was rejected."
+                        runRecord.statusRawValue = state.status.rawValue
+                        runRecord.lastError = AgentRuntimeError.approvalRejected(tool.name).localizedDescription
+                        runRecord.summary = state.finalResponse
+                        runRecord.completedAt = .now
+                        runRecord.updatedAt = .now
+                        try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
+                        try telemetryBuffer.flush(runID: state.runID, to: context)
+                        continuation.yield(.completed(runID: state.runID, response: state.finalResponse))
+                        continuation.finish()
+                        return
+                    }
+                }
 
-            let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
-            state.observations.append(observation)
-            try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                observation
+                _ = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .executeTool, selectedToolName: tool.name, selectedToolSchema: tool.schema, budget: provider.capabilities.maxContextTokens)
+                let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, networkAccessAllowed: options.networkToolsEnabled, context: context)
+                if let result {
+                    state.toolResults.append(result.output)
+                    telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
+                }
+                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                    result?.output ?? "Tool produced no output."
+                }
+
+                let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
+                state.observations.append(observation)
+                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                    observation
+                }
             }
         }
 
@@ -657,7 +679,7 @@ struct AgentLoop: Sendable {
         let approval = ApprovalRequestRecord(
             runID: state.runID,
             actionName: tool.name,
-            reason: "\(tool.name) is \(tool.riskLevel.rawValue) risk or current autonomy is \(options.autonomyLevel.label)."
+            reason: approvalReason(tool: tool, goal: goal, autonomyLevel: options.autonomyLevel)
         )
         context.insert(approval)
 
@@ -689,6 +711,21 @@ struct AgentLoop: Sendable {
     private func approvalRecord(runID: UUID, toolName: String, context: ModelContext) throws -> ApprovalRequestRecord? {
         let descriptor = FetchDescriptor<ApprovalRequestRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
         return try context.fetch(descriptor).first { $0.runID == runID && $0.actionName == toolName }
+    }
+
+    private func approvalReason(tool: any Tool, goal: String, autonomyLevel: AutonomyLevel) -> String {
+        let metadata = tool.metadata(for: goal)
+        var details = ["\(tool.name) is \(tool.riskLevel.rawValue) risk or current autonomy is \(autonomyLevel.label)."]
+        if let action = metadata.actionPreview, !action.isEmpty {
+            details.append("Action: \(action).")
+        }
+        if let target = metadata.targetPreview, !target.isEmpty {
+            details.append("Target: \(target).")
+        }
+        if metadata.requiresNetwork {
+            details.append("Requires network access.")
+        }
+        return details.joined(separator: " ")
     }
 
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
@@ -831,11 +868,53 @@ final class AgentRuntime {
     }
 
     func run(goal: String, conversationID: UUID?, messages: [String], provider: any LLMProvider, options: AgentRuntimeOptions, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
-        loop.run(goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context)
+        let runID = UUID()
+        return AsyncThrowingStream { continuation in
+            let task = Task { @MainActor in
+                do {
+                    for try await event in loop.run(runID: runID, goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context) {
+                        continuation.yield(event)
+                    }
+                    runningTasks[runID] = nil
+                    continuation.finish()
+                } catch {
+                    runningTasks[runID] = nil
+                    continuation.finish(throwing: error)
+                }
+            }
+            runningTasks[runID] = task
+            continuation.onTermination = { @Sendable _ in
+                Task { @MainActor in
+                    self.runningTasks[runID]?.cancel()
+                    self.runningTasks[runID] = nil
+                }
+            }
+        }
     }
 
     func resume(run: AgentRunRecord, provider: any LLMProvider, options: AgentRuntimeOptions? = nil, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
-        loop.resume(run: run, provider: provider, options: options, context: context)
+        AsyncThrowingStream { continuation in
+            let runID = run.id
+            let task = Task { @MainActor in
+                do {
+                    for try await event in loop.resume(run: run, provider: provider, options: options, context: context) {
+                        continuation.yield(event)
+                    }
+                    runningTasks[runID] = nil
+                    continuation.finish()
+                } catch {
+                    runningTasks[runID] = nil
+                    continuation.finish(throwing: error)
+                }
+            }
+            runningTasks[runID] = task
+            continuation.onTermination = { @Sendable _ in
+                Task { @MainActor in
+                    self.runningTasks[runID]?.cancel()
+                    self.runningTasks[runID] = nil
+                }
+            }
+        }
     }
 
     func pause(run: AgentRunRecord, context: ModelContext) throws {

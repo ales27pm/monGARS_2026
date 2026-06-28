@@ -8,8 +8,9 @@
 4. Expand tool routing with explicit tests before adding more tools.
 5. Keep the autonomous loop inspectable: every step writes trace, checkpoints, and tool-call evidence.
 6. Keep provider and tool network behavior opt-in and visible in Settings, with localhost/private LAN blocked unless Developer Mode is explicitly enabled.
-7. Add real streaming and transcription flows behind the existing provider/service protocols.
-8. Keep Remote LLM paused for this native-tools pass; do not expand provider schemas until requested.
+7. Keep Developer diagnostics available in-app as no-mock real-tool E2E probes plus redacted report export, separate from XCTest/build validation.
+8. Add real streaming and transcription flows behind the existing provider/service protocols.
+9. Keep Remote LLM paused for this native-tools pass; do not expand provider schemas until requested.
 
 ## Current Autonomous Flow
 
@@ -40,9 +41,11 @@ xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platfor
 
 On this machine, `build-for-testing` and `test-without-building` succeeded against the explicit `monGARS Test iPhone` simulator. The latest full simulator run passed 48 Swift Testing tests after the native-tools pass.
 
+For slow or unreliable simulator launch cycles, use Settings > Developer > `Run Real Tool E2E & Export Report` on-device or in an already-running app. This invokes production tool implementations directly without `MockLLMProvider`, honors the network toggle, and provides a redacted runtime report for tool probes, network policy, Keychain, framework availability, permissions, SwiftData counts, and recent diagnostics. It is complementary evidence, not a replacement for `xcodebuild` compilation.
+
 ## Current Known Gaps
 
-- Signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`.
+- Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. The current project build number is `202606280033`, so that upload is historical evidence rather than a current-build upload.
 - Document summarization is deterministic and based on imported text excerpts, not semantic embeddings.
 - Network-capable tools remain disabled until Settings enables network provider and tools, even after approval.
 - WeatherKit still requires the Apple entitlement/provisioning path on device; otherwise weather uses the configured OpenWeather-compatible fallback.

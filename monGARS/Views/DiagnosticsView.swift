@@ -48,7 +48,7 @@ struct DiagnosticsView: View {
             Section("Persisted Runs") {
                 ForEach(runs.prefix(12)) { run in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(run.goal)
+                        Text(DiagnosticsRedactor.redact(run.goal, maxLength: 180))
                             .font(.headline)
                         Text("\(run.statusRawValue) | \(run.currentPhase) | step \(run.currentStep)")
                             .font(.caption)
@@ -92,7 +92,7 @@ struct DiagnosticsView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        Text(trace.message)
+                        Text(DiagnosticsRedactor.redact(trace.message, maxLength: 360))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -104,7 +104,7 @@ struct DiagnosticsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(record.nodeID)
                             .font(.headline)
-                        Text(record.stateSummary)
+                        Text(DiagnosticsRedactor.redact(record.stateSummary, maxLength: 260))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -127,11 +127,11 @@ struct DiagnosticsView: View {
                         Text("\(row.stepIndex). \(row.phase)")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Text(row.goal)
+                        Text(DiagnosticsRedactor.redact(row.goal, maxLength: 160))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        Text(row.message)
+                        Text(DiagnosticsRedactor.redact(row.message, maxLength: 220))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -147,7 +147,7 @@ struct DiagnosticsView: View {
         let nodes = DiagnosticsVisualizationBuilder.graphNodes(for: latestRun, traces: traces)
         return VStack(alignment: .leading, spacing: 10) {
             if let latestRun {
-                Text(latestRun.goal)
+                Text(DiagnosticsRedactor.redact(latestRun.goal, maxLength: 180))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -240,12 +240,12 @@ struct DiagnosticsView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
 
-            Text(call.input)
+            Text(DiagnosticsRedactor.redact(call.input, maxLength: 260))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
-            Text(call.output)
+            Text(DiagnosticsRedactor.redact(call.output, maxLength: 360))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
@@ -256,20 +256,21 @@ struct DiagnosticsView: View {
         var lines: [String] = ["monGARS Diagnostics Export", ""]
         for run in runs.prefix(12) {
             lines.append("Run: \(run.id.uuidString)")
-            lines.append("Goal: \(run.goal)")
+            lines.append("Goal: \(DiagnosticsRedactor.redact(run.goal, maxLength: 260))")
             lines.append("Status: \(run.statusRawValue)")
             lines.append("Phase: \(run.currentPhase)")
             lines.append("")
         }
         for call in persistedToolCalls.prefix(50) {
             lines.append("Tool: \(call.toolName)")
-            lines.append("Target: \(call.target ?? "none")")
+            lines.append("Target: \(DiagnosticsRedactor.redact(call.target ?? "none", maxLength: 160))")
             lines.append("Approved: \(call.approved)")
             lines.append("Risk: \(call.riskLevel)")
             lines.append("Status code: \(call.statusCode.map(String.init) ?? "none")")
             lines.append("Latency ms: \(Int(call.latencyMs))")
             lines.append("Error category: \(call.errorCategory ?? "none")")
-            lines.append("Output: \(call.output)")
+            lines.append("Input: \(DiagnosticsRedactor.redact(call.input, maxLength: 360))")
+            lines.append("Output: \(DiagnosticsRedactor.redact(call.output, maxLength: 500))")
             lines.append("")
         }
         return lines.joined(separator: "\n")

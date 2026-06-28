@@ -32,6 +32,7 @@ protocol Tool: Sendable {
     var riskLevel: ToolRiskLevel { get }
     var requiresApproval: Bool { get }
     func canHandle(_ input: String) -> Bool
+    func metadata(for input: String) -> ToolExecutionMetadata
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult
 }
 
@@ -43,6 +44,10 @@ extension Tool {
     var riskLevel: ToolRiskLevel { .low }
 
     var requiresApproval: Bool { riskLevel.requiresApprovalByDefault }
+
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        ToolExecutionMetadata()
+    }
 
     func run(input: String, context: ModelContext) async throws -> ToolResult {
         try await execute(request: ToolExecutionRequest(runID: UUID(), input: input, autonomyLevel: .assisted, approved: true), context: context)
@@ -89,14 +94,7 @@ private func requirePrivacyApproval(_ request: ToolExecutionRequest, toolName: S
 }
 
 private func networkDisabledResult(toolName: String, riskLevel: ToolRiskLevel) -> ToolResult {
-    ToolResult(
-        toolName: toolName,
-        output: "Network tools are disabled in Settings. Enable network access before running this tool.",
-        riskLevel: riskLevel,
-        requiresApproval: true,
-        approved: true,
-        errorCategory: "network_disabled"
-    )
+    ToolResult.networkDisabled(toolName: toolName, riskLevel: riskLevel)
 }
 
 private func cleanedInput(_ input: String, removing phrases: [String]) -> String {
@@ -132,6 +130,11 @@ private func firstHTTPURL(in input: String) -> URL? {
         return nil
     }
     return url
+}
+
+private func networkTargetPreview(from input: String) -> String? {
+    guard let url = firstHTTPURL(in: input) else { return nil }
+    return url.host ?? url.absoluteString
 }
 
 private func normalizedIntent(_ input: String) -> String {
@@ -516,12 +519,15 @@ struct ContactsTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
+        let query = Self.searchQuery(from: request.input)
+        guard !query.isEmpty else {
+            return ToolResult(toolName: name, output: "Provide a non-empty contact name, organization, phone-number owner, or email owner to search.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+        }
         #if canImport(Contacts)
         let granted = try await requestContactsAccess()
         guard granted else {
             return ToolResult(toolName: name, output: "Contacts permission was not granted.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
-        let query = cleanedInput(request.input, removing: ["find contact", "contact", "phone number for", "email address for"]).lowercased()
         let store = CNContactStore()
         let keys: [CNKeyDescriptor] = [
             CNContactGivenNameKey as CNKeyDescriptor,
@@ -551,6 +557,10 @@ struct ContactsTool: Tool {
         #endif
     }
 
+    private static func searchQuery(from input: String) -> String {
+        cleanedInput(input, removing: ["find contact", "search contacts", "contact", "contacts", "phone number for", "email address for"]).lowercased()
+    }
+
     #if canImport(Contacts)
     private func requestContactsAccess() async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
@@ -578,6 +588,15 @@ struct WeatherTool: Tool {
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
         return lower.contains("weather") || lower.contains("forecast")
+    }
+
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        let location = Self.weatherLocation(from: input)
+        return ToolExecutionMetadata(
+            requiresNetwork: true,
+            targetPreview: location.isEmpty ? "Weather provider and current location" : "Weather provider for \(location)",
+            actionPreview: "Fetch weather conditions"
+        )
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
@@ -953,6 +972,15 @@ struct MapsTool: Tool {
             || lower.contains("show me where")
     }
 
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        let query = cleanedInput(input, removing: ["open map", "map", "directions to", "directions", "navigate to", "navigate", "nearby"])
+        return ToolExecutionMetadata(
+            requiresNetwork: true,
+            targetPreview: query.isEmpty ? "MapKit search" : "MapKit search for \(query)",
+            actionPreview: "Search Maps and prepare Apple Maps handoff"
+        )
+    }
+
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
         guard request.networkAccessAllowed else {
@@ -1051,6 +1079,14 @@ struct WebViewTool: Tool {
         return lower.contains("webview") || lower.contains("web view") || lower.contains("open website")
     }
 
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        ToolExecutionMetadata(
+            requiresNetwork: true,
+            targetPreview: networkTargetPreview(from: input),
+            actionPreview: "Open URL in the integrated web view"
+        )
+    }
+
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
         guard request.networkAccessAllowed else {
@@ -1059,7 +1095,12 @@ struct WebViewTool: Tool {
         guard let url = firstHTTPURL(in: request.input) else {
             return ToolResult(toolName: name, output: "Provide an http or https URL for the integrated web view.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
-        return ToolResult(toolName: name, output: "Approved in-app webview navigation prepared: \(url.absoluteString)", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        do {
+            try AppNetworkConfiguration.networkPolicy().validate(url)
+        } catch NetworkClientError.blockedHost(let host) {
+            return ToolResult(toolName: name, output: "Web view navigation to \(host) is blocked unless Developer Mode allows local and private LAN hosts.", riskLevel: riskLevel, requiresApproval: true, approved: true, target: host, errorCategory: "blocked_host")
+        }
+        return ToolResult(toolName: name, output: "Approved in-app webview navigation prepared: \(url.absoluteString)", riskLevel: riskLevel, requiresApproval: true, approved: true, target: url.host)
     }
 }
 
@@ -1075,6 +1116,14 @@ struct WebFetchTool: Tool {
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
         return lower.contains("web fetch") || lower.hasPrefix("fetch ") || lower.contains("download url")
+    }
+
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        ToolExecutionMetadata(
+            requiresNetwork: true,
+            targetPreview: networkTargetPreview(from: input),
+            actionPreview: "Fetch and extract a short web preview"
+        )
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
@@ -1506,6 +1555,15 @@ struct RemoteNetworkTool: Tool {
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
         return lower.contains("network") || lower.contains("remote http") || lower.range(of: #"^(get|post|put|patch|delete)\s+https?://"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    func metadata(for input: String) -> ToolExecutionMetadata {
+        let method = Self.method(from: input)
+        return ToolExecutionMetadata(
+            requiresNetwork: true,
+            targetPreview: networkTargetPreview(from: input),
+            actionPreview: "Run approved HTTP \(method.rawValue) request"
+        )
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {

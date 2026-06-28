@@ -5,7 +5,7 @@
 - Add editable conversation titles and message retry/regenerate controls.
 - Add share-sheet export for memory/document exports.
 - Add UI tests once simulator execution is stable on the target machine.
-- Add Settings one-tap live diagnostics for Weather, Web Fetch, MapKit, Contacts, Calendar, and Reminders.
+- Add UI-level automation around the existing Developer real-tool E2E report once simulator/device launch is stable on the target machine.
 
 ## Mid Term
 
@@ -34,4 +34,5 @@
 - Added PDFKit extraction for web fetch and document import.
 - Added default private-LAN/localhost blocking with explicit Developer Mode opt-in.
 - Added structured HTML extraction for title, description, canonical URL, and readable text.
+- Added Settings > Developer one-button real-tool E2E report export with no-mock tool probes, redaction, Keychain/network-policy checks, permission state, SwiftData counts, and recent diagnostics.
 - Added memory edit/export/forget-all UI in Memories.

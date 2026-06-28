@@ -334,6 +334,17 @@ struct ChatView: View {
     }
 
     private func handleToolHandoff(_ action: ToolHandoffAction) {
+        if ["http", "https"].contains(action.url.scheme?.lowercased() ?? "") {
+            do {
+                try AppNetworkConfiguration.networkPolicy().validate(action.url)
+            } catch NetworkClientError.blockedHost(let host) {
+                errorMessage = "Navigation to \(host) is blocked unless Developer Mode is on."
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
         switch action.destination {
         case .integratedWebView:
             webViewRequest = IntegratedWebViewRequest(url: action.url)

@@ -73,12 +73,32 @@ struct ToolSchema: Codable, Sendable {
     var examples: [String]
 }
 
+struct ToolExecutionMetadata: Sendable, Equatable {
+    var requiresNetwork: Bool = false
+    var targetPreview: String?
+    var actionPreview: String?
+}
+
 struct ToolExecutionRequest: Sendable {
     var runID: UUID
     var input: String
     var autonomyLevel: AutonomyLevel
     var approved: Bool
     var networkAccessAllowed: Bool = false
+}
+
+extension ToolResult {
+    static func networkDisabled(toolName: String, riskLevel: ToolRiskLevel, target: String? = nil) -> ToolResult {
+        ToolResult(
+            toolName: toolName,
+            output: "Network tools are disabled in Settings. Enable network access before running this tool.",
+            riskLevel: riskLevel,
+            requiresApproval: false,
+            approved: true,
+            target: target,
+            errorCategory: "network_disabled"
+        )
+    }
 }
 
 struct AgentRuntimeOptions: Sendable {
