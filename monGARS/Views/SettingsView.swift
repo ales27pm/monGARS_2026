@@ -33,7 +33,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Network Access") {
+            Section("Network") {
                 Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 TextField("Endpoint", text: remoteEndpoint)
                     .textInputAutocapitalization(.never)
@@ -60,7 +60,7 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Text("Remote provider calls, web fetches, weather lookups, and in-app web navigation are disabled unless this toggle is on. Mock and Foundation modes make no developer-backend network requests.")
+                Text("Network is off by default. Remote provider calls, web fetches, weather lookups, Maps search, and in-app web navigation stay disabled unless this toggle is on.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -78,16 +78,40 @@ struct SettingsView: View {
                     Text("Imperial").tag("imperial")
                     Text("Standard").tag("standard")
                 }
-                Text("Weather lookup requires network access, approval, and a configured API key. Secrets are stored in Keychain.")
+                Text("Weather lookup prefers WeatherKit when available, then falls back to this OpenWeather-compatible endpoint. Keys are stored in Keychain.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Generic HTTP") {
+            Section("Web") {
                 TextEditor(text: remoteNetworkHeadersText)
                     .frame(minHeight: 88)
                     .font(.footnote.monospaced())
-                Text("Optional headers for the generic remote network tool, one per line as Name: Value. Do not put secrets here unless the value is safe to store outside Keychain.")
+                Text("Optional headers for the generic remote network tool, one per line as Name: Value. Web fetch and WebKit navigation still require network access and approval.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Documents/RAG") {
+                LabeledContent("Import") {
+                    Text("UTF-8 text, Markdown, selectable-text PDF")
+                }
+                Text("Imported PDFs are extracted locally with PDFKit and stored as SwiftData chunks for retrieval.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Apple Integrations") {
+                LabeledContent("Maps") {
+                    Text("MapKit search + Apple Maps handoff")
+                }
+                LabeledContent("Communication") {
+                    Text("Messages, Phone, Mail handoff")
+                }
+                LabeledContent("Data") {
+                    Text("EventKit + Contacts permissions")
+                }
+                Text("Native integrations require approval. The app prepares system UI or handoff URLs; it never auto-sends, auto-calls, or dumps contact data.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -110,6 +134,13 @@ struct SettingsView: View {
                         _ = await container.speechService.requestAuthorization()
                     }
                 }
+            }
+
+            Section("Developer") {
+                Toggle("Allow localhost and private LAN hosts", isOn: developerModeEnabled)
+                Text("Developer Mode permits localhost, .local, and private LAN HTTP targets for local testing. Keep it off for normal privacy-first operation.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Reset") {
@@ -218,6 +249,14 @@ struct SettingsView: View {
             container.settingsStore.autonomyLevel
         } set: { value in
             container.settingsStore.autonomyLevel = value
+        }
+    }
+
+    private var developerModeEnabled: Binding<Bool> {
+        Binding {
+            container.settingsStore.developerModeEnabled
+        } set: { value in
+            container.settingsStore.developerModeEnabled = value
         }
     }
 

@@ -59,19 +59,36 @@ struct DocumentService: Sendable {
     var embeddingProvider: any EmbeddingProvider = CoreMLEmbeddingProvider()
 
     func importDocument(url: URL, context: ModelContext) throws {
-        guard url.startAccessingSecurityScopedResource() else {
+        let scoped = url.startAccessingSecurityScopedResource()
+        guard scoped || FileManager.default.isReadableFile(atPath: url.path) else {
             throw PersistenceError.importFailed("The selected file could not be opened.")
         }
-        defer { url.stopAccessingSecurityScopedResource() }
+        defer {
+            if scoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
 
         let data = try Data(contentsOf: url)
-        guard let content = String(data: data, encoding: .utf8) else {
-            throw PersistenceError.importFailed("Only UTF-8 text and Markdown files are supported.")
+        let content: String
+        if Self.isPDF(url: url) {
+            content = try PDFTextExtractor.extract(data: data).text
+        } else if let text = String(data: data, encoding: .utf8) {
+            content = text
+        } else {
+            throw PersistenceError.importFailed("Only UTF-8 text, Markdown, and selectable-text PDF files are supported.")
         }
         let record = DocumentRecord(title: url.lastPathComponent, content: content)
         context.insert(record)
         try rebuildChunks(for: record, context: context)
         try context.safeSave()
+    }
+
+    private static func isPDF(url: URL) -> Bool {
+        if url.pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame {
+            return true
+        }
+        return UTType(filenameExtension: url.pathExtension)?.conforms(to: .pdf) == true
     }
 
     func documents(context: ModelContext) throws -> [DocumentRecord] {

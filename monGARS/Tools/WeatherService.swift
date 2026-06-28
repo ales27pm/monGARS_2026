@@ -1,0 +1,194 @@
+import Foundation
+
+#if canImport(CoreLocation)
+import CoreLocation
+#endif
+
+#if canImport(WeatherKit)
+import WeatherKit
+#endif
+
+struct WeatherReport: Sendable, Equatable {
+    var locationName: String
+    var condition: String
+    var temperature: Double
+    var temperatureUnit: String
+    var humidityPercent: Int
+    var windSpeed: Double
+    var windUnit: String
+    var provider: String
+    var target: String
+    var statusCode: Int?
+    var latencyMs: Double
+}
+
+protocol WeatherService: Sendable {
+    func currentWeather(for location: String) async throws -> WeatherReport
+}
+
+enum WeatherServiceError: LocalizedError, Equatable {
+    case missingAPIKey
+    case invalidEndpoint
+    case weatherKitUnavailable(String)
+    case geocodingFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingAPIKey:
+            "Weather API key is missing. Add an OpenWeather-compatible key in Settings, or enable WeatherKit for this app target."
+        case .invalidEndpoint:
+            "Weather endpoint in Settings is not a valid URL."
+        case .weatherKitUnavailable(let reason):
+            "WeatherKit is unavailable: \(reason)"
+        case .geocodingFailed(let location):
+            "Could not geocode weather location: \(location)."
+        }
+    }
+}
+
+enum WeatherServiceFactory {
+    static func makeConfiguredService() -> any WeatherService {
+        CompositeWeatherService(
+            primary: WeatherKitWeatherService(),
+            fallback: OpenWeatherCompatibleWeatherService(
+                endpoint: AppNetworkConfiguration.weatherEndpoint,
+                apiKey: AppNetworkConfiguration.weatherAPIKey,
+                units: AppNetworkConfiguration.weatherUnits,
+                client: AppNetworkConfiguration.client()
+            )
+        )
+    }
+}
+
+struct CompositeWeatherService: WeatherService {
+    var primary: (any WeatherService)?
+    var fallback: any WeatherService
+
+    func currentWeather(for location: String) async throws -> WeatherReport {
+        if let primary {
+            do {
+                return try await primary.currentWeather(for: location)
+            } catch WeatherServiceError.weatherKitUnavailable {
+                return try await fallback.currentWeather(for: location)
+            } catch {
+                if AppNetworkConfiguration.weatherAPIKey.isEmpty {
+                    throw error
+                }
+                return try await fallback.currentWeather(for: location)
+            }
+        }
+        return try await fallback.currentWeather(for: location)
+    }
+}
+
+struct WeatherKitWeatherService: WeatherService {
+    func currentWeather(for location: String) async throws -> WeatherReport {
+        #if canImport(WeatherKit) && canImport(CoreLocation)
+        let started = ContinuousClock.now
+        let placemarks = try await CLGeocoder().geocodeAddressString(location)
+        guard let coordinate = placemarks.first?.location?.coordinate else {
+            throw WeatherServiceError.geocodingFailed(location)
+        }
+        do {
+            let weather = try await WeatherKit.WeatherService.shared.weather(for: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
+            let current = weather.currentWeather
+            let temperature = current.temperature.converted(to: UnitTemperature.celsius).value
+            let windSpeed = current.wind.speed.converted(to: UnitSpeed.metersPerSecond).value
+            let latency = Self.latencyMilliseconds(started.duration(to: ContinuousClock.now))
+            return WeatherReport(
+                locationName: placemarks.first?.locality ?? placemarks.first?.name ?? location,
+                condition: current.condition.description,
+                temperature: temperature,
+                temperatureUnit: "C",
+                humidityPercent: Int((current.humidity * 100).rounded()),
+                windSpeed: windSpeed,
+                windUnit: "m/s",
+                provider: "WeatherKit",
+                target: "weatherkit.apple.com",
+                statusCode: nil,
+                latencyMs: latency
+            )
+        } catch {
+            throw WeatherServiceError.weatherKitUnavailable(error.localizedDescription)
+        }
+        #else
+        throw WeatherServiceError.weatherKitUnavailable("WeatherKit is not available in this build.")
+        #endif
+    }
+
+    private static func latencyMilliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds * 1_000) + Double(duration.components.attoseconds) / 1_000_000_000_000_000
+    }
+}
+
+struct OpenWeatherCompatibleWeatherService: WeatherService {
+    var endpoint: String
+    var apiKey: String
+    var units: String
+    var client: NetworkClient
+
+    func currentWeather(for location: String) async throws -> WeatherReport {
+        guard !apiKey.isEmpty else {
+            throw WeatherServiceError.missingAPIKey
+        }
+        guard var components = URLComponents(string: endpoint) else {
+            throw WeatherServiceError.invalidEndpoint
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "q", value: location))
+        queryItems.append(URLQueryItem(name: "appid", value: apiKey))
+        queryItems.append(URLQueryItem(name: "units", value: units))
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw WeatherServiceError.invalidEndpoint
+        }
+
+        let response = try await client.send(NetworkRequest(url: url, acceptedContentTypes: ["application/json"]))
+        let weather = try response.decodedJSON(OpenWeatherPayload.self)
+        let unit = Self.temperatureUnit(for: units)
+        return WeatherReport(
+            locationName: weather.name.isEmpty ? location : weather.name,
+            condition: weather.weather.first?.description ?? "conditions unavailable",
+            temperature: weather.main.temp,
+            temperatureUnit: unit,
+            humidityPercent: weather.main.humidity,
+            windSpeed: weather.wind?.speed ?? 0,
+            windUnit: units == "imperial" ? "mph" : "m/s",
+            provider: "OpenWeather-compatible",
+            target: response.finalURL.host ?? response.finalURL.absoluteString,
+            statusCode: response.statusCode,
+            latencyMs: response.latencyMs
+        )
+    }
+
+    private static func temperatureUnit(for units: String) -> String {
+        switch units {
+        case "imperial":
+            return "F"
+        case "standard":
+            return "K"
+        default:
+            return "C"
+        }
+    }
+}
+
+private struct OpenWeatherPayload: Decodable {
+    var name: String
+    var weather: [Condition]
+    var main: Main
+    var wind: Wind?
+
+    struct Condition: Decodable {
+        var description: String
+    }
+
+    struct Main: Decodable {
+        var temp: Double
+        var humidity: Int
+    }
+
+    struct Wind: Decodable {
+        var speed: Double
+    }
+}

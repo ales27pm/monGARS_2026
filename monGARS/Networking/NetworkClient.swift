@@ -18,6 +18,7 @@ struct NetworkClientConfiguration: Sendable {
     var maxRetries: Int = 2
     var retryBaseDelaySeconds: TimeInterval = 0.35
     var maxResponseBytes: Int = 1_000_000
+    var allowsLocalNetworkHosts: Bool = false
 
     static let defaultProduction = NetworkClientConfiguration()
 }
@@ -172,7 +173,7 @@ struct NetworkClient: Sendable {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
             throw NetworkClientError.invalidScheme
         }
-        if let host = url.host?.lowercased(), isBlockedHost(host) {
+        if !configuration.allowsLocalNetworkHosts, let host = url.host?.lowercased(), isBlockedHost(host) {
             throw NetworkClientError.blockedHost(host)
         }
     }
@@ -241,7 +242,36 @@ struct NetworkClient: Sendable {
     }
 
     private func isBlockedHost(_ host: String) -> Bool {
-        host == "0.0.0.0" || host.hasSuffix(".localdomain")
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if normalized == "localhost" || normalized == "localhost." || normalized == "0.0.0.0" {
+            return true
+        }
+        if normalized.hasSuffix(".local") || normalized.hasSuffix(".localdomain") {
+            return true
+        }
+        if normalized == "::1" || normalized == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        if normalized.hasPrefix("fe80:") || normalized.hasPrefix("fc") || normalized.hasPrefix("fd") {
+            return true
+        }
+
+        let parts = normalized.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else {
+            return false
+        }
+        switch parts[0] {
+        case 10, 127:
+            return true
+        case 169:
+            return parts[1] == 254
+        case 172:
+            return (16...31).contains(parts[1])
+        case 192:
+            return parts[1] == 168
+        default:
+            return false
+        }
     }
 
     private static func latencyMilliseconds(_ duration: Duration) -> Double {

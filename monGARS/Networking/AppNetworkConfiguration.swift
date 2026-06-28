@@ -10,6 +10,7 @@ enum AppNetworkConfiguration {
         static let weatherAPIKey = "weatherAPIKey"
         static let weatherUnits = "weatherUnits"
         static let remoteNetworkHeaders = "remoteNetworkHeaders"
+        static let developerModeEnabled = "developerModeEnabled"
     }
 
     static func client() -> NetworkClient {
@@ -20,7 +21,8 @@ enum AppNetworkConfiguration {
             timeoutSeconds: timeout > 0 ? timeout : 20,
             maxRetries: max(0, min(retries, 5)),
             retryBaseDelaySeconds: 0.35,
-            maxResponseBytes: 1_000_000
+            maxResponseBytes: 1_000_000,
+            allowsLocalNetworkHosts: defaults.bool(forKey: Keys.developerModeEnabled)
         ))
     }
 

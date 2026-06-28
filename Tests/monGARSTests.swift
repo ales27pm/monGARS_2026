@@ -3,6 +3,10 @@ import SwiftData
 import Testing
 @testable import monGARS
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 final class TestURLProtocol: URLProtocol {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -47,6 +51,20 @@ final class LockedString: @unchecked Sendable {
         }
     }
 }
+
+#if canImport(UIKit)
+private func makePDFData(text: String) -> Data {
+    let data = NSMutableData()
+    UIGraphicsBeginPDFContextToData(data, CGRect(x: 0, y: 0, width: 240, height: 160), nil)
+    UIGraphicsBeginPDFPage()
+    (text as NSString).draw(
+        at: CGPoint(x: 24, y: 48),
+        withAttributes: [.font: UIFont.systemFont(ofSize: 14)]
+    )
+    UIGraphicsEndPDFContext()
+    return data as Data
+}
+#endif
 
 @MainActor
 struct MonGARSTests {
@@ -152,6 +170,16 @@ struct MonGARSTests {
         TestURLProtocol.handler = nil
     }
 
+    @Test func networkClientBlocksPrivateLANByDefault() async throws {
+        let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0))
+        do {
+            _ = try await client.send(NetworkRequest(url: try #require(URL(string: "http://192.168.1.25/status"))))
+            #expect(Bool(false), "Private LAN hosts should be blocked unless Developer Mode enables them.")
+        } catch NetworkClientError.blockedHost(let host) {
+            #expect(host == "192.168.1.25")
+        }
+    }
+
     @Test func networkClientStreamsLinesThroughConfiguredSession() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TestURLProtocol.self]
@@ -177,6 +205,46 @@ struct MonGARSTests {
         #expect(lines.contains("data: one"))
         #expect(lines.contains("data: two"))
         TestURLProtocol.handler = nil
+    }
+
+    @Test func htmlExtractorReturnsMetadataAndReadableText() {
+        let html = """
+        <html>
+          <head>
+            <title>Example &amp; Test</title>
+            <meta name="description" content="Useful page summary">
+            <link rel="canonical" href="https://example.com/article">
+            <style>.hidden { display: none; }</style>
+          </head>
+          <body><nav>Skip this</nav><main><h1>Hello</h1><p>Readable body&nbsp;text.</p></main><script>bad()</script></body>
+        </html>
+        """
+
+        let content = WebContentExtractor.extractHTML(html)
+
+        #expect(content.title == "Example & Test")
+        #expect(content.metaDescription == "Useful page summary")
+        #expect(content.canonicalURL == "https://example.com/article")
+        #expect(content.readableText.contains("Hello"))
+        #expect(content.readableText.contains("Readable body text."))
+        #expect(!content.readableText.contains("bad()"))
+        #expect(!content.readableText.contains("Skip this"))
+    }
+
+    @Test func openWeatherServiceRequiresConfiguredKey() async throws {
+        let service = OpenWeatherCompatibleWeatherService(
+            endpoint: "https://example.com/weather",
+            apiKey: "",
+            units: "metric",
+            client: NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0))
+        )
+
+        do {
+            _ = try await service.currentWeather(for: "Montreal")
+            #expect(Bool(false), "Weather fallback should not fake success without a key.")
+        } catch WeatherServiceError.missingAPIKey {
+            #expect(true)
+        }
     }
 
     @Test func settingsHeaderParserValidatesNameValueLines() {
@@ -349,6 +417,34 @@ struct MonGARSTests {
         #expect(read.output == "private local note")
         #expect(delete.output.contains(filename))
     }
+
+    @Test func localFileToolBlocksPathTraversal() async throws {
+        let (_, context) = makeContext()
+        let result = try await LocalFileTool().execute(
+            request: ToolExecutionRequest(runID: UUID(), input: #"write file "../escape.txt" content no"#, autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+        #expect(result.output.contains("Provide a filename"))
+    }
+
+    @Test func keychainSaveReadDeleteRoundTrip() {
+        let account = "test-\(UUID().uuidString)"
+        KeychainStore.delete(account: account)
+        KeychainStore.set(" secret-token ", for: account)
+        #expect(KeychainStore.string(for: account) == "secret-token")
+        KeychainStore.delete(account: account)
+        #expect(KeychainStore.string(for: account).isEmpty)
+    }
+
+    #if canImport(UIKit)
+    @Test func pdfKitExtractorReturnsPageText() throws {
+        let data = makePDFData(text: "Hello selectable PDF")
+        let extraction = try PDFTextExtractor.extract(data: data)
+
+        #expect(extraction.text.contains("Page 1"))
+        #expect(extraction.text.localizedCaseInsensitiveContains("Hello selectable PDF"))
+    }
+    #endif
 
     @Test func toolHandoffParserBuildsApprovedActions() {
         let message = """

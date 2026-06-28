@@ -143,31 +143,24 @@ private func fetchText(url: URL, limit: Int) async throws -> WebFetchSummary {
     ))
     let target = response.finalURL.host ?? response.finalURL.absoluteString
     if response.contentType?.contains("application/pdf") == true {
+        let extraction = try PDFTextExtractor.extract(data: response.data)
         return WebFetchSummary(
-            text: "Fetched PDF from \(target) in \(Int(response.latencyMs)) ms. PDF text extraction is not available in this build.",
+            text: String(extraction.text.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines),
             target: target,
             statusCode: response.statusCode,
             latencyMs: response.latencyMs
         )
     }
     let text = response.text
-    let cleaned = response.contentType?.contains("text/html") == true ? strippedHTML(text) : text
+    let cleaned = response.contentType?.contains("text/html") == true
+        ? WebContentExtractor.extractHTML(text).preview(limit: limit)
+        : WebContentExtractor.extractPlainText(text, limit: limit)
     return WebFetchSummary(
-        text: String(cleaned.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines),
+        text: cleaned,
         target: target,
         statusCode: response.statusCode,
         latencyMs: response.latencyMs
     )
-}
-
-private func strippedHTML(_ input: String) -> String {
-    input
-        .replacingOccurrences(of: #"<script[\s\S]*?</script>"#, with: " ", options: [.regularExpression, .caseInsensitive])
-        .replacingOccurrences(of: #"<style[\s\S]*?</style>"#, with: " ", options: [.regularExpression, .caseInsensitive])
-        .replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
-        .replacingOccurrences(of: "&nbsp;", with: " ")
-        .replacingOccurrences(of: "&amp;", with: "&")
-        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
 }
 
 private func localFileWorkspace() throws -> URL {
@@ -193,7 +186,9 @@ private func filename(in input: String) -> String? {
 }
 
 private func sanitizedFilename(_ raw: String) -> String? {
-    let trimmed = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+    let pathTrimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !pathTrimmed.contains("/"), !pathTrimmed.contains("\\") else { return nil }
+    let trimmed = pathTrimmed.trimmingCharacters(in: .punctuationCharacters)
     let filename = URL(fileURLWithPath: trimmed).lastPathComponent
     guard !filename.isEmpty, filename != ".", filename != ".." else { return nil }
     return filename
@@ -443,33 +438,28 @@ struct WeatherTool: Tool {
         guard !location.isEmpty else {
             return ToolResult(toolName: name, output: "Provide a location for weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
         }
-        guard !AppNetworkConfiguration.weatherAPIKey.isEmpty else {
-            return ToolResult(toolName: name, output: "Weather API key is missing. Add an OpenWeather-compatible key in Settings before weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+        let report: WeatherReport
+        do {
+            report = try await WeatherServiceFactory.makeConfiguredService().currentWeather(for: location)
+        } catch WeatherServiceError.missingAPIKey {
+            return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+        } catch WeatherServiceError.invalidEndpoint {
+            return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+        } catch WeatherServiceError.geocodingFailed(let failedLocation) {
+            return ToolResult(toolName: name, output: WeatherServiceError.geocodingFailed(failedLocation).localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "geocoding_failed")
+        } catch {
+            return ToolResult(toolName: name, output: "Weather lookup failed: \(error.localizedDescription)", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
         }
-        guard var components = URLComponents(string: AppNetworkConfiguration.weatherEndpoint) else {
-            return ToolResult(toolName: name, output: "Weather endpoint in Settings is not a valid URL.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
-        }
-        var queryItems = components.queryItems ?? []
-        queryItems.append(URLQueryItem(name: "q", value: location))
-        queryItems.append(URLQueryItem(name: "appid", value: AppNetworkConfiguration.weatherAPIKey))
-        queryItems.append(URLQueryItem(name: "units", value: AppNetworkConfiguration.weatherUnits))
-        components.queryItems = queryItems
-        guard let url = components.url else {
-            return ToolResult(toolName: name, output: "Weather request could not be built from the configured endpoint.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
-        }
-        let response = try await AppNetworkConfiguration.client().send(NetworkRequest(url: url, acceptedContentTypes: ["application/json"]))
-        let weather = try response.decodedJSON(OpenWeatherResponse.self)
-        let description = weather.weather.first?.description ?? "conditions unavailable"
-        let output = "Weather for \(weather.name.isEmpty ? location : weather.name): \(description), \(Int(weather.main.temp.rounded())) degrees, humidity \(weather.main.humidity)%, wind \(String(format: "%.1f", weather.wind?.speed ?? 0)) m/s. Status \(response.statusCode), \(Int(response.latencyMs)) ms."
+        let output = "Weather for \(report.locationName): \(report.condition), \(Int(report.temperature.rounded()))°\(report.temperatureUnit), humidity \(report.humidityPercent)%, wind \(String(format: "%.1f", report.windSpeed)) \(report.windUnit). Provider \(report.provider), \(Int(report.latencyMs)) ms."
         return ToolResult(
             toolName: name,
             output: output,
             riskLevel: riskLevel,
             requiresApproval: true,
             approved: true,
-            target: response.finalURL.host ?? response.finalURL.absoluteString,
-            statusCode: response.statusCode,
-            latencyMs: response.latencyMs
+            target: report.target,
+            statusCode: report.statusCode,
+            latencyMs: report.latencyMs
         )
     }
 }
@@ -1109,7 +1099,9 @@ struct RemoteNetworkTool: Tool {
             body: bodyText?.data(using: .utf8),
             acceptedContentTypes: ["application/json", "text/plain", "text/html"]
         ))
-        let preview = String((response.contentType?.contains("text/html") == true ? strippedHTML(response.text) : response.text).prefix(1_000))
+        let preview = response.contentType?.contains("text/html") == true
+            ? WebContentExtractor.extractHTML(response.text).preview(limit: 1_000)
+            : WebContentExtractor.extractPlainText(response.text, limit: 1_000)
         let host = response.finalURL.host ?? url.host ?? url.absoluteString
         return ToolResult(
             toolName: name,
@@ -1126,25 +1118,5 @@ struct RemoteNetworkTool: Tool {
     private static func method(from input: String) -> HTTPMethod {
         let first = input.split(separator: " ").first.map { String($0).uppercased() }
         return HTTPMethod.allCases.first { $0.rawValue == first } ?? .get
-    }
-}
-
-private struct OpenWeatherResponse: Decodable {
-    var name: String
-    var weather: [Condition]
-    var main: Main
-    var wind: Wind?
-
-    struct Condition: Decodable {
-        var description: String
-    }
-
-    struct Main: Decodable {
-        var temp: Double
-        var humidity: Int
-    }
-
-    struct Wind: Decodable {
-        var speed: Double
     }
 }

@@ -55,6 +55,10 @@ final class SettingsStore {
         didSet { UserDefaults.standard.set(autonomyLevel.rawValue, forKey: Keys.autonomyLevel) }
     }
 
+    var developerModeEnabled: Bool {
+        didSet { UserDefaults.standard.set(developerModeEnabled, forKey: AppNetworkConfiguration.Keys.developerModeEnabled) }
+    }
+
     init() {
         let rawMode = UserDefaults.standard.string(forKey: Keys.providerMode) ?? ProviderMode.foundation.rawValue
         providerMode = ProviderMode(rawValue: rawMode) ?? .foundation
@@ -71,6 +75,7 @@ final class SettingsStore {
         remoteNetworkHeadersText = Self.headersText(AppNetworkConfiguration.remoteNetworkHeaders)
         let rawAutonomy = UserDefaults.standard.string(forKey: Keys.autonomyLevel) ?? AutonomyLevel.assisted.rawValue
         autonomyLevel = AutonomyLevel(rawValue: rawAutonomy) ?? .assisted
+        developerModeEnabled = UserDefaults.standard.bool(forKey: AppNetworkConfiguration.Keys.developerModeEnabled)
     }
 
     func resetNetworkConfiguration() {
@@ -84,6 +89,7 @@ final class SettingsStore {
         weatherAPIKey = ""
         weatherUnits = "metric"
         remoteNetworkHeadersText = ""
+        developerModeEnabled = false
         UserDefaults.standard.removeObject(forKey: AppNetworkConfiguration.Keys.remoteNetworkHeaders)
     }
 

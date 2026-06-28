@@ -11,17 +11,15 @@ Use a real device or simulator with network access. Start with `Enable network p
 
 ## Remote LLM
 
-- In Settings, select Remote Endpoint, enable network, set an Ollama `/api/generate` endpoint and model, then tap Test Remote Connection. Expected: success or an actionable provider/network error.
-- Repeat with an OpenAI-compatible `/v1/chat/completions` endpoint and API key. Expected: bearer token is used, but the key is never displayed in diagnostics or logs.
-- Use a streaming-capable endpoint in Chat. Expected: streamed chunks arrive through the same network policy and fail with clear HTTP/content-type errors if the endpoint is wrong.
-- Disable network and test again. Expected: remote provider refuses to call the endpoint.
+- Remote LLM is paused for the native-tools pass. Do not add provider schemas while validating native tools.
+- If existing Remote Endpoint mode is selected manually, disable network and test again. Expected: remote provider refuses to call the endpoint.
 
 ## Web And Weather
 
-- Configure an OpenWeather-compatible endpoint and API key. Ask for weather in a real city. Expected: real summary with status and latency.
-- Remove the weather API key. Expected: missing-key error, no request.
-- Fetch an HTML page. Expected: readable text, no script/style noise.
-- Fetch a PDF URL. Expected: PDF detected and reported; no fake text extraction.
+- Configure WeatherKit entitlement or an OpenWeather-compatible endpoint and API key. Ask for weather in a real city. Expected: real summary with provider and latency.
+- Remove the weather API key on a build/device without WeatherKit entitlement. Expected: missing-key error, no fake weather.
+- Fetch an HTML page. Expected: title, meta description/canonical URL when present, readable text, no script/style noise.
+- Fetch a PDF URL with selectable text. Expected: PDFKit returns page-numbered text preview.
 
 ## Apple Integrations
 

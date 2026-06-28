@@ -58,6 +58,9 @@ struct DiagnosticsView: View {
             }
 
             Section("Persisted Tool Calls") {
+                if !persistedToolCalls.isEmpty {
+                    ShareLink("Export Diagnostics", item: diagnosticsExportText)
+                }
                 ForEach(persistedToolCalls.prefix(20)) { call in
                     toolCallRow(call)
                 }
@@ -247,6 +250,29 @@ struct DiagnosticsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
         }
+    }
+
+    private var diagnosticsExportText: String {
+        var lines: [String] = ["monGARS Diagnostics Export", ""]
+        for run in runs.prefix(12) {
+            lines.append("Run: \(run.id.uuidString)")
+            lines.append("Goal: \(run.goal)")
+            lines.append("Status: \(run.statusRawValue)")
+            lines.append("Phase: \(run.currentPhase)")
+            lines.append("")
+        }
+        for call in persistedToolCalls.prefix(50) {
+            lines.append("Tool: \(call.toolName)")
+            lines.append("Target: \(call.target ?? "none")")
+            lines.append("Approved: \(call.approved)")
+            lines.append("Risk: \(call.riskLevel)")
+            lines.append("Status code: \(call.statusCode.map(String.init) ?? "none")")
+            lines.append("Latency ms: \(Int(call.latencyMs))")
+            lines.append("Error category: \(call.errorCategory ?? "none")")
+            lines.append("Output: \(call.output)")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 

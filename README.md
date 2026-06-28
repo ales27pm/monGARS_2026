@@ -40,14 +40,13 @@ Current verification on this machine:
 - Generic iPhoneOS arm64 compilation succeeded with signing disabled, validating the iOS 18 device build path independently of simulator execution.
 - Unsigned Release archive succeeded at `/tmp/monGARS-Unsigned.xcarchive`; the archive contains `monGARS.app`, dSYMs, bundle id `app.27pm.monGARS`, version `1.0`, and build `202606271944`.
 - Manual simulator launch succeeded on the `monGARS Test iPhone` iOS 26.3 simulator. The app shows a visible startup state, then transitions to Chat.
-- Focused simulator execution of `autonomousRuntimeCompletesAndPersistsTrace` succeeded with `xcodebuild test-without-building`, proving the core document-summary plus memory-save runtime path in XCTest.
-- Full and multi-test simulator execution remain unreliable on this machine: after long waits, CoreSimulator shuts the device down and Xcode reports `** BUILD INTERRUPTED **`. A fresh iOS 18.6 simulator also stalled during first-boot LaunchServices migration.
+- Full simulator execution succeeded with `xcodebuild test-without-building` against `monGARS Test iPhone` after `build-for-testing`; 48 Swift Testing tests passed.
 
 ## Demo Flow
 
 1. Open Settings and use `Mock Local` or Foundation Models with mock fallback for local-only behavior.
 2. Keep `Enable network provider and tools` off unless testing remote/web behavior intentionally.
-3. Import a UTF-8 text or Markdown document from Documents.
+3. Import a UTF-8 text, Markdown, or selectable-text PDF document from Documents.
 4. In Chat, ask: `summarize my imported document and remember the key points`.
 5. Confirm the assistant summarizes imported document content, saves a durable memory, and shows agent trace rows under the assistant response.
 6. Inspect, edit, export, delete, or forget memories from Memories.
@@ -63,14 +62,14 @@ Current verification on this machine:
 - `monGARS/AgentGraph`: graph state, autonomous runtime, planner, executor, observer, reflector, context builder, checkpoints, resume support.
 - `monGARS/Tools`: schema/risk-aware tool protocol, registry, router, local tools, native Apple permission tools, web/weather fetch, handoff tools, and approved generic HTTP.
 - `monGARS/Memory`: scored, deduplicated, searchable, editable, exportable local memory service.
-- `monGARS/Documents`: document import and keyword retrieval.
+- `monGARS/Documents`: document import, PDFKit text extraction, chunking, and keyword retrieval.
 - `monGARS/Speech`: speech service abstraction and Apple Speech permission implementation.
 - `monGARS/Views`: compact/regular root navigation, chat, settings, memories, documents, goals/tasks, diagnostics.
 - `Tests`: unit tests.
 
 ## Privacy Defaults
 
-The default provider mode is Foundation Models with local fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. API keys are stored in Keychain, not UserDefaults.
+The default provider mode is Foundation Models with local fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. Localhost, `.local`, and private LAN hosts are blocked by the central `NetworkClient` unless Developer Mode is enabled in Settings. API keys are stored in Keychain, not UserDefaults.
 
 ## Autonomous Agent Loop
 
@@ -94,5 +93,6 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 - Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
 - Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
 - Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.
-- Web fetch extracts text from HTML/plain text/JSON. PDF downloads are detected and reported, but PDF text extraction is not implemented in this build.
+- WeatherKit requires the Apple WeatherKit entitlement and valid provisioning on device. Without it, weather lookup falls back to the configured OpenWeather-compatible endpoint and Keychain-stored API key.
+- Web fetch extracts title, meta description, canonical URL, and readable text from HTML; plain text and JSON previews are bounded; PDF downloads use PDFKit text extraction when selectable text is present.
 - Remote provider support covers OpenAI-compatible chat completions and Ollama generate/chat payloads. Other provider-specific schemas may require an adapter.

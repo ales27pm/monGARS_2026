@@ -7,8 +7,9 @@
 3. Keep `MockLLMProvider` as the guaranteed build/test/demo provider.
 4. Expand tool routing with explicit tests before adding more tools.
 5. Keep the autonomous loop inspectable: every step writes trace, checkpoints, and tool-call evidence.
-6. Keep provider and tool network behavior opt-in and visible in Settings.
+6. Keep provider and tool network behavior opt-in and visible in Settings, with localhost/private LAN blocked unless Developer Mode is explicitly enabled.
 7. Add real streaming and transcription flows behind the existing provider/service protocols.
+8. Keep Remote LLM paused for this native-tools pass; do not expand provider schemas until requested.
 
 ## Current Autonomous Flow
 
@@ -37,11 +38,11 @@ xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destina
 xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO
 ```
 
-On this machine, the generic iPhoneOS arm64 build and unsigned Release archive succeeded with signing disabled, and app/test compilation succeeded against the explicit `monGARS Test iPhone` simulator UDID after adding a shared Xcode scheme. Manual simulator launch reached the Chat screen. Focused simulator execution of the autonomous demo test succeeded. Full and multi-test simulator execution remain unstable because CoreSimulator shuts the device down and Xcode reports `** BUILD INTERRUPTED **`; see README for the exact status.
+On this machine, `build-for-testing` and `test-without-building` succeeded against the explicit `monGARS Test iPhone` simulator. The latest full simulator run passed 48 Swift Testing tests after the native-tools pass.
 
 ## Current Known Gaps
 
-- Full XCTest execution needs a healthier CoreSimulator/Xcode test-runner path; focused simulator tests can pass.
 - Signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`.
 - Document summarization is deterministic and based on imported text excerpts, not semantic embeddings.
 - Network-capable tools remain disabled until Settings enables network provider and tools, even after approval.
+- WeatherKit still requires the Apple entitlement/provisioning path on device; otherwise weather uses the configured OpenWeather-compatible fallback.
