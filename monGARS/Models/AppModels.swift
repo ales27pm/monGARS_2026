@@ -237,9 +237,27 @@ final class ToolCallRecord {
     var riskLevel: String
     var requiresApproval: Bool
     var approved: Bool
+    var target: String?
+    var statusCode: Int?
+    var latencyMs: Double
+    var errorCategory: String?
     var createdAt: Date
 
-    init(id: UUID = UUID(), runID: UUID, toolName: String, input: String, output: String, riskLevel: String, requiresApproval: Bool, approved: Bool, createdAt: Date = .now) {
+    init(
+        id: UUID = UUID(),
+        runID: UUID,
+        toolName: String,
+        input: String,
+        output: String,
+        riskLevel: String,
+        requiresApproval: Bool,
+        approved: Bool,
+        target: String? = nil,
+        statusCode: Int? = nil,
+        latencyMs: Double = 0,
+        errorCategory: String? = nil,
+        createdAt: Date = .now
+    ) {
         self.id = id
         self.runID = runID
         self.toolName = toolName
@@ -248,6 +266,10 @@ final class ToolCallRecord {
         self.riskLevel = riskLevel
         self.requiresApproval = requiresApproval
         self.approved = approved
+        self.target = target
+        self.statusCode = statusCode
+        self.latencyMs = latencyMs
+        self.errorCategory = errorCategory
         self.createdAt = createdAt
     }
 }

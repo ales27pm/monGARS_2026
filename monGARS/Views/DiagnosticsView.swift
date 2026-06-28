@@ -59,13 +59,7 @@ struct DiagnosticsView: View {
 
             Section("Persisted Tool Calls") {
                 ForEach(persistedToolCalls.prefix(20)) { call in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(call.toolName)
-                            .font(.headline)
-                        Text(call.output)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    toolCallRow(call)
                 }
             }
 
@@ -78,8 +72,23 @@ struct DiagnosticsView: View {
             Section("Trace Events") {
                 ForEach(traces.prefix(24)) { trace in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(trace.stepIndex). \(trace.phase)")
-                            .font(.headline)
+                        HStack(spacing: 8) {
+                            Text("\(trace.stepIndex). \(trace.phase)")
+                                .font(.headline)
+                            if let toolName = trace.toolName {
+                                Text(toolName)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(.tertiarySystemFill))
+                                    .clipShape(Capsule())
+                            }
+                            if trace.latencyMs > 0 {
+                                Text("\(Int(trace.latencyMs)) ms")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         Text(trace.message)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -194,5 +203,112 @@ struct DiagnosticsView: View {
         case .failed:
             return .red
         }
+    }
+
+    private func toolCallRow(_ call: ToolCallRecord) -> some View {
+        let summary = ToolCallDiagnosticsSummary(call: call)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(call.toolName)
+                    .font(.headline)
+                Text(summary.status)
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(summary.statusColor.opacity(0.15))
+                    .foregroundStyle(summary.statusColor)
+                    .clipShape(Capsule())
+                Spacer()
+                if let latency = summary.latencyText {
+                    Text(latency)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Label(call.riskLevel, systemImage: "exclamationmark.shield")
+                Label(call.approved ? "approved" : "not approved", systemImage: call.approved ? "checkmark.circle" : "xmark.circle")
+                if let target = summary.target {
+                    Label(target, systemImage: "network")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+            Text(call.input)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            Text(call.output)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(4)
+        }
+    }
+}
+
+private struct ToolCallDiagnosticsSummary {
+    var status: String
+    var statusColor: Color
+    var target: String?
+    var latencyText: String?
+
+    init(call: ToolCallRecord) {
+        let output = call.output
+        let lower = output.lowercased()
+        if let statusCode = call.statusCode {
+            status = "HTTP \(statusCode)"
+            statusColor = (200..<300).contains(statusCode) ? .green : .orange
+        } else if call.errorCategory != nil || lower.contains("network tools are disabled") || lower.contains("api key is missing") || lower.contains("permission was not granted") || lower.contains("was not created") {
+            status = "blocked"
+            statusColor = .orange
+        } else if lower.contains("failed") || lower.contains("invalid") || lower.contains("provide ") {
+            status = "error"
+            statusColor = .red
+        } else {
+            status = "ok"
+            statusColor = .green
+        }
+
+        target = call.target ?? Self.extractTarget(from: output) ?? Self.extractTarget(from: call.input)
+        latencyText = call.latencyMs > 0 ? "\(Int(call.latencyMs)) ms" : Self.extractLatency(from: output)
+    }
+
+    private static func extractTarget(from text: String) -> String? {
+        if let url = firstURL(in: text), let host = url.host {
+            return host
+        }
+
+        let httpPattern = #"HTTP\s+[A-Z]+\s+([^\s]+)\s+completed"#
+        if let value = firstCapture(in: text, pattern: httpPattern) {
+            return value
+        }
+
+        return nil
+    }
+
+    private static func extractLatency(from text: String) -> String? {
+        if let value = firstCapture(in: text, pattern: #"(\d+)\s*ms"#) {
+            return "\(value) ms"
+        }
+        return nil
+    }
+
+    private static func firstURL(in text: String) -> URL? {
+        let pattern = #"https?://[^\s]+"#
+        guard let raw = firstCapture(in: text, pattern: pattern, wholeMatch: true) else { return nil }
+        return URL(string: raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)))
+    }
+
+    private static func firstCapture(in text: String, pattern: String, wholeMatch: Bool = false) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range) else { return nil }
+        let captureIndex = wholeMatch ? 0 : min(1, match.numberOfRanges - 1)
+        guard let swiftRange = Range(match.range(at: captureIndex), in: text) else { return nil }
+        return String(text[swiftRange])
     }
 }

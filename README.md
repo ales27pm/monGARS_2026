@@ -58,8 +58,10 @@ Current verification on this machine:
 - `monGARS/Models`: SwiftData models.
 - `monGARS/Persistence`: persistence helpers and local error types.
 - `monGARS/LLM`: provider protocol and Foundation/mock/remote providers.
+- `monGARS/Networking`: centralized URLSession client, retry/timeout policy, status/content-type validation, line streaming, and network configuration helpers.
+- `monGARS/Security`: Keychain-backed secret storage.
 - `monGARS/AgentGraph`: graph state, autonomous runtime, planner, executor, observer, reflector, context builder, checkpoints, resume support.
-- `monGARS/Tools`: schema/risk-aware tool protocol, registry, router, calculator, date/time, memory tools, document tools, conversation search, diagnostics, tasks, disabled remote stub.
+- `monGARS/Tools`: schema/risk-aware tool protocol, registry, router, local tools, native Apple permission tools, web/weather fetch, handoff tools, and approved generic HTTP.
 - `monGARS/Memory`: scored, deduplicated, searchable, editable, exportable local memory service.
 - `monGARS/Documents`: document import and keyword retrieval.
 - `monGARS/Speech`: speech service abstraction and Apple Speech permission implementation.
@@ -68,7 +70,7 @@ Current verification on this machine:
 
 ## Privacy Defaults
 
-The default provider mode is Foundation Models with local mock fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, web fetch, integrated web navigation, and the remote/network placeholder, also remain disabled unless the same Settings toggle is enabled, and still require approval before running.
+The default provider mode is Foundation Models with local fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. API keys are stored in Keychain, not UserDefaults.
 
 ## Autonomous Agent Loop
 
@@ -91,4 +93,6 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 - Signed archive export/upload has not been run from this checkout.
 - Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
 - Document retrieval is lexical today. The Core ML embedding provider reports unavailable until a `DocumentEmbedding` model is bundled and wired.
-- Remote provider authentication profiles and richer calendar/reminder parsing are future work.
+- Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.
+- Web fetch extracts text from HTML/plain text/JSON. PDF downloads are detected and reported, but PDF text extraction is not implemented in this build.
+- Remote provider support covers OpenAI-compatible chat completions and Ollama generate/chat payloads. Other provider-specific schemas may require an adapter.

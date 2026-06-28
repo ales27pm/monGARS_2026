@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var container: AppContainer
+    @State private var connectionTestStatus: String?
 
     var body: some View {
         Form {
@@ -37,7 +38,56 @@ struct SettingsView: View {
                 TextField("Endpoint", text: remoteEndpoint)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                TextField("Model", text: remoteModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("Remote API key", text: remoteAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                LabeledContent("Timeout") {
+                    Stepper("\(Int(container.settingsStore.networkTimeoutSeconds))s", value: networkTimeoutSeconds, in: 5...90, step: 5)
+                }
+                LabeledContent("Retries") {
+                    Stepper("\(container.settingsStore.networkMaxRetries)", value: networkMaxRetries, in: 0...5)
+                }
+                Button("Test Remote Connection") {
+                    Task { await testRemoteConnection() }
+                }
+                .disabled(!container.settingsStore.remoteProviderEnabled)
+                if let connectionTestStatus {
+                    Text(connectionTestStatus)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Text("Remote provider calls, web fetches, weather lookups, and in-app web navigation are disabled unless this toggle is on. Mock and Foundation modes make no developer-backend network requests.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Weather") {
+                TextField("OpenWeather-compatible endpoint", text: weatherEndpoint)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                SecureField("Weather API key", text: weatherAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Picker("Units", selection: weatherUnits) {
+                    Text("Metric").tag("metric")
+                    Text("Imperial").tag("imperial")
+                    Text("Standard").tag("standard")
+                }
+                Text("Weather lookup requires network access, approval, and a configured API key. Secrets are stored in Keychain.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Generic HTTP") {
+                TextEditor(text: remoteNetworkHeadersText)
+                    .frame(minHeight: 88)
+                    .font(.footnote.monospaced())
+                Text("Optional headers for the generic remote network tool, one per line as Name: Value. Do not put secrets here unless the value is safe to store outside Keychain.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -59,6 +109,13 @@ struct SettingsView: View {
                     Task {
                         _ = await container.speechService.requestAuthorization()
                     }
+                }
+            }
+
+            Section("Reset") {
+                Button("Reset Network Configuration", role: .destructive) {
+                    container.settingsStore.resetNetworkConfiguration()
+                    connectionTestStatus = "Network configuration reset. Network access is off."
                 }
             }
         }
@@ -92,11 +149,87 @@ struct SettingsView: View {
         }
     }
 
+    private var remoteModel: Binding<String> {
+        Binding {
+            container.settingsStore.remoteModel
+        } set: { value in
+            container.settingsStore.remoteModel = value
+        }
+    }
+
+    private var remoteAPIKey: Binding<String> {
+        Binding {
+            container.settingsStore.remoteAPIKey
+        } set: { value in
+            container.settingsStore.remoteAPIKey = value
+        }
+    }
+
+    private var networkTimeoutSeconds: Binding<Double> {
+        Binding {
+            container.settingsStore.networkTimeoutSeconds
+        } set: { value in
+            container.settingsStore.networkTimeoutSeconds = value
+        }
+    }
+
+    private var networkMaxRetries: Binding<Int> {
+        Binding {
+            container.settingsStore.networkMaxRetries
+        } set: { value in
+            container.settingsStore.networkMaxRetries = value
+        }
+    }
+
+    private var weatherEndpoint: Binding<String> {
+        Binding {
+            container.settingsStore.weatherEndpoint
+        } set: { value in
+            container.settingsStore.weatherEndpoint = value
+        }
+    }
+
+    private var weatherAPIKey: Binding<String> {
+        Binding {
+            container.settingsStore.weatherAPIKey
+        } set: { value in
+            container.settingsStore.weatherAPIKey = value
+        }
+    }
+
+    private var weatherUnits: Binding<String> {
+        Binding {
+            container.settingsStore.weatherUnits
+        } set: { value in
+            container.settingsStore.weatherUnits = value
+        }
+    }
+
+    private var remoteNetworkHeadersText: Binding<String> {
+        Binding {
+            container.settingsStore.remoteNetworkHeadersText
+        } set: { value in
+            container.settingsStore.remoteNetworkHeadersText = value
+        }
+    }
+
     private var autonomyLevel: Binding<AutonomyLevel> {
         Binding {
             container.settingsStore.autonomyLevel
         } set: { value in
             container.settingsStore.autonomyLevel = value
+        }
+    }
+
+    private func testRemoteConnection() async {
+        connectionTestStatus = "Testing remote endpoint..."
+        do {
+            let provider = container.llmProvider()
+            let response = try await provider.complete(request: LLMRequest(prompt: "Reply with: ok", conversationContext: [], retrievedContext: []))
+            connectionTestStatus = "Remote connection succeeded: \(response.text.prefix(80))"
+            container.diagnostics.providerStatus = await provider.status
+        } catch {
+            connectionTestStatus = "Remote connection failed: \(error.localizedDescription)"
         }
     }
 }

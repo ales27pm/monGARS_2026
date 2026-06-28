@@ -71,13 +71,21 @@ actor AgentApprovalGate {
 
     private var continuations: [UUID: ApprovalWaiter] = [:]
     private var resolvedDecisions: [UUID: ApprovalDecision] = [:]
+    private var cancelledRunIDs: Set<UUID> = []
 
     func suspend(runID: UUID, approvalID: UUID) async -> ApprovalDecision {
+        if cancelledRunIDs.contains(runID) {
+            return .rejected
+        }
         if let decision = resolvedDecisions.removeValue(forKey: approvalID) {
             return decision
         }
 
         return await withCheckedContinuation { continuation in
+            if cancelledRunIDs.contains(runID) {
+                continuation.resume(returning: .rejected)
+                return
+            }
             if let decision = resolvedDecisions.removeValue(forKey: approvalID) {
                 continuation.resume(returning: decision)
             } else {
@@ -96,6 +104,7 @@ actor AgentApprovalGate {
     }
 
     func cancel(runID: UUID) {
+        cancelledRunIDs.insert(runID)
         let approvalIDs = continuations.compactMap { approvalID, waiter in
             waiter.runID == runID ? approvalID : nil
         }
@@ -132,6 +141,10 @@ private struct ToolCallSnapshot: Sendable {
     var riskLevel: String
     var requiresApproval: Bool
     var approved: Bool
+    var target: String?
+    var statusCode: Int?
+    var latencyMs: Double
+    var errorCategory: String?
     var createdAt: Date
 }
 
@@ -204,6 +217,10 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             riskLevel: result.riskLevel.rawValue,
             requiresApproval: result.requiresApproval,
             approved: result.approved,
+            target: result.target,
+            statusCode: result.statusCode,
+            latencyMs: result.latencyMs ?? 0,
+            errorCategory: result.errorCategory,
             createdAt: .now
         )
         lock.withLock {
@@ -216,6 +233,10 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     riskLevel: snapshot.riskLevel,
                     requiresApproval: snapshot.requiresApproval,
                     approved: snapshot.approved,
+                    target: snapshot.target,
+                    statusCode: snapshot.statusCode,
+                    latencyMs: snapshot.latencyMs,
+                    errorCategory: snapshot.errorCategory,
                     createdAt: snapshot.createdAt
                 ))
             } else {
@@ -263,17 +284,21 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         }
 
         for toolCall in payload.2 {
-            context.insert(ToolCallRecord(
-                runID: toolCall.runID,
-                toolName: toolCall.toolName,
-                input: toolCall.input,
-                output: toolCall.output,
-                riskLevel: toolCall.riskLevel,
-                requiresApproval: toolCall.requiresApproval,
-                approved: toolCall.approved,
-                createdAt: toolCall.createdAt
-            ))
-        }
+                context.insert(ToolCallRecord(
+                    runID: toolCall.runID,
+                    toolName: toolCall.toolName,
+                    input: toolCall.input,
+                    output: toolCall.output,
+                    riskLevel: toolCall.riskLevel,
+                    requiresApproval: toolCall.requiresApproval,
+                    approved: toolCall.approved,
+                    target: toolCall.target,
+                    statusCode: toolCall.statusCode,
+                    latencyMs: toolCall.latencyMs,
+                    errorCategory: toolCall.errorCategory,
+                    createdAt: toolCall.createdAt
+                ))
+            }
 
         try context.safeSave()
     }
@@ -317,6 +342,10 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     riskLevel: toolCall.riskLevel,
                     requiresApproval: toolCall.requiresApproval,
                     approved: toolCall.approved,
+                    target: toolCall.target,
+                    statusCode: toolCall.statusCode,
+                    latencyMs: toolCall.latencyMs,
+                    errorCategory: toolCall.errorCategory,
                     createdAt: toolCall.createdAt
                 ))
                 sourceContext.delete(toolCall)

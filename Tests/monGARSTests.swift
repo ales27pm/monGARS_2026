@@ -3,6 +3,51 @@ import SwiftData
 import Testing
 @testable import monGARS
 
+final class TestURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+final class LockedString: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = ""
+
+    var value: String {
+        lock.withLock { storage }
+    }
+
+    func set(_ value: String) {
+        lock.withLock {
+            storage = value
+        }
+    }
+}
+
 @MainActor
 struct MonGARSTests {
     private func makeContext() -> (AppContainer, ModelContext) {
@@ -61,6 +106,83 @@ struct MonGARSTests {
         ]
 
         #expect(expected.isSubset(of: toolNames))
+    }
+
+    @Test func networkClientValidatesStatusContentTypeAndLatency() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        TestURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: try #require(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )
+            return (try #require(response), Data(#"{"ok":true}"#.utf8))
+        }
+
+        let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
+        let response = try await client.send(NetworkRequest(url: try #require(URL(string: "https://example.com/status")), acceptedContentTypes: ["application/json"]))
+
+        #expect(response.statusCode == 200)
+        #expect(response.text.contains("\"ok\""))
+        #expect(response.latencyMs >= 0)
+
+        TestURLProtocol.handler = nil
+    }
+
+    @Test func networkClientRejectsHTTPFailures() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        TestURLProtocol.handler = { request in
+            let response = HTTPURLResponse(url: try #require(request.url), statusCode: 503, httpVersion: nil, headerFields: ["Content-Type": "application/json"])
+            return (try #require(response), Data())
+        }
+
+        let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
+        do {
+            _ = try await client.send(NetworkRequest(url: try #require(URL(string: "https://example.com/down")), acceptedContentTypes: ["application/json"]))
+            #expect(Bool(false), "503 should fail")
+        } catch NetworkClientError.unacceptableStatus(let status) {
+            #expect(status == 503)
+        }
+
+        TestURLProtocol.handler = nil
+    }
+
+    @Test func networkClientStreamsLinesThroughConfiguredSession() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        TestURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: try #require(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "text/event-stream"]
+            )
+            return (try #require(response), Data("data: one\n\ndata: two\n".utf8))
+        }
+
+        let client = NetworkClient(configuration: NetworkClientConfiguration(timeoutSeconds: 5, maxRetries: 0), session: session)
+        var lines: [String] = []
+        for try await event in client.streamLines(NetworkRequest(url: try #require(URL(string: "https://example.com/stream")), acceptedContentTypes: ["text/event-stream"])) {
+            lines.append(event.line)
+            #expect(event.statusCode == 200)
+            #expect(event.finalURL.host == "example.com")
+        }
+
+        #expect(lines.contains("data: one"))
+        #expect(lines.contains("data: two"))
+        TestURLProtocol.handler = nil
+    }
+
+    @Test func settingsHeaderParserValidatesNameValueLines() {
+        #expect(SettingsStore.parseHeaders("X-Test: one\nAccept: application/json") == ["X-Test": "one", "Accept": "application/json"])
+        #expect(SettingsStore.parseHeaders("Authorization") == nil)
+        #expect(SettingsStore.parseHeaders("X-Empty:") == nil)
     }
 
     @Test func compactNavigationSmokeTestBuildsRootSections() {
@@ -179,6 +301,21 @@ struct MonGARSTests {
         }
     }
 
+    @Test func remoteNetworkToolIsRealAndRequiresURLWhenEnabled() async throws {
+        let (_, context) = makeContext()
+        let request = ToolExecutionRequest(runID: UUID(), input: "remote network check", autonomyLevel: .auto, approved: true, networkAccessAllowed: true)
+        let result = try await RemoteNetworkTool().execute(request: request, context: context)
+        #expect(result.output.contains("Provide an HTTP or HTTPS URL"))
+        #expect(!result.output.localizedCaseInsensitiveContains("stubbed"))
+    }
+
+    @Test func textMessageRequiresRecipientPhone() async throws {
+        let (_, context) = makeContext()
+        let request = ToolExecutionRequest(runID: UUID(), input: "text hello", autonomyLevel: .assisted, approved: true)
+        let result = try await TextMessageTool().execute(request: request, context: context)
+        #expect(result.output.contains("Provide a phone number"))
+    }
+
     @Test func approvedLocalFileToolStaysInAgentWorkspace() async throws {
         let (_, context) = makeContext()
         let tool = LocalFileTool()
@@ -226,7 +363,7 @@ struct MonGARSTests {
 
         #expect(actions.contains { $0.label == "Open Messages" && $0.destination == .openURL })
         #expect(actions.contains { $0.label == "Call" && $0.destination == .openURL })
-        #expect(actions.contains { $0.label == "Open Mail" && $0.destination == .openURL })
+        #expect(actions.contains { $0.label == "Compose Email" && $0.destination == .mailCompose })
         #expect(actions.contains { $0.label == "Open Maps" && $0.destination == .openURL })
         #expect(actions.contains { $0.label == "Open Web View" && $0.destination == .integratedWebView && $0.url.absoluteString == "https://example.com" })
     }
@@ -694,8 +831,8 @@ struct MonGARSTests {
         let runID = UUID()
         buffer.appendToolCall(
             runID: runID,
-            input: "calculate 2 + 3",
-            result: ToolResult(toolName: "calculator", output: "2 + 3 = 5")
+            input: "GET https://example.com/status",
+            result: ToolResult(toolName: "remote_network", output: "HTTP GET example.com completed", target: "example.com", statusCode: 200, latencyMs: 42)
         )
 
         let beforeFlush = try context.fetch(FetchDescriptor<ToolCallRecord>())
@@ -705,8 +842,11 @@ struct MonGARSTests {
 
         let afterFlush = try context.fetch(FetchDescriptor<ToolCallRecord>())
         #expect(afterFlush.count == 1)
-        #expect(afterFlush.first?.toolName == "calculator")
-        #expect(afterFlush.first?.output == "2 + 3 = 5")
+        #expect(afterFlush.first?.toolName == "remote_network")
+        #expect(afterFlush.first?.output == "HTTP GET example.com completed")
+        #expect(afterFlush.first?.target == "example.com")
+        #expect(afterFlush.first?.statusCode == 200)
+        #expect(afterFlush.first?.latencyMs == 42)
     }
 
     @Test func approvalGateCancelRunReleasesSuspendedApproval() async throws {
@@ -726,14 +866,14 @@ struct MonGARSTests {
 
     @Test func mockSpeechServiceStreamsPartialTranscript() async throws {
         let service = MockSpeechService(transcript: "hello monGARS")
-        var partial = ""
+        let partial = LockedString()
         try await service.startTranscription { text in
-            partial = text
+            partial.set(text)
         }
 
         let status = await service.status
         #expect(status == "Mock speech ready")
-        #expect(partial == "hello monGARS")
+        #expect(partial.value == "hello monGARS")
         #expect(service.stopCount == 0)
 
         service.stopTranscription()

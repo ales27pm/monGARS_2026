@@ -61,7 +61,13 @@ final class AppContainer {
         case .mock:
             return MockLLMProvider()
         case .remote:
-            return RemoteLLMProvider(endpoint: settingsStore.remoteEndpoint, isEnabled: settingsStore.remoteProviderEnabled)
+            return RemoteLLMProvider(
+                endpoint: settingsStore.remoteEndpoint,
+                isEnabled: settingsStore.remoteProviderEnabled,
+                model: settingsStore.remoteModel,
+                apiKey: settingsStore.remoteAPIKey,
+                client: AppNetworkConfiguration.client()
+            )
         }
     }
 

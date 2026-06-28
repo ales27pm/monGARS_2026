@@ -19,6 +19,7 @@ struct ChatView: View {
     @State private var pendingApprovals: [UUID: PendingApproval] = [:]
     @State private var isDictating = false
     @State private var webViewRequest: IntegratedWebViewRequest?
+    @State private var mailComposeRequest: MailComposeRequest?
 
     init(container: AppContainer, navigateToSection: ((AppSection) -> Void)? = nil) {
         self.container = container
@@ -188,6 +189,9 @@ struct ChatView: View {
         .sheet(item: $webViewRequest) { request in
             IntegratedWebViewSheet(url: request.url)
         }
+        .sheet(item: $mailComposeRequest) { request in
+            MailComposeSheet(request: request)
+        }
     }
 
     private var activeConversation: Conversation? {
@@ -339,6 +343,8 @@ struct ChatView: View {
         switch action.destination {
         case .integratedWebView:
             webViewRequest = IntegratedWebViewRequest(url: action.url)
+        case .mailCompose:
+            mailComposeRequest = MailComposeRequest(url: action.url)
         case .openURL:
             openURL(action.url)
         }

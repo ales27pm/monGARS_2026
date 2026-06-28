@@ -108,12 +108,19 @@ struct ContextBuilder: Sendable {
             let separator = "\n[truncated]\n"
             let available = approximateCharacterBudget - tail.count - separator.count
             if available > 0 {
-                let perBlockBudget = max(40, available / protectedBlocks.count)
-                let protectedText = protectedBlocks
-                    .map { trim($0, characterLimit: perBlockBudget) }
-                    .joined(separator: "\n\n")
+                var remaining = available
+                var protectedPieces: [String] = []
+                for block in protectedBlocks where remaining > 0 {
+                    let separatorCost = protectedPieces.isEmpty ? 0 : 2
+                    let limit = max(0, remaining - separatorCost)
+                    let piece = trim(block, characterLimit: limit)
+                    guard !piece.isEmpty else { continue }
+                    protectedPieces.append(piece)
+                    remaining -= piece.count + separatorCost
+                }
+                let protectedText = protectedPieces.joined(separator: "\n\n")
                 if !protectedText.isEmpty {
-                    return protectedText + separator + tail
+                    return fit(protectedText + separator + tail, characterLimit: approximateCharacterBudget)
                 }
             }
         }
@@ -128,7 +135,7 @@ struct ContextBuilder: Sendable {
         case .executeTool:
             ["Current phase:", "Selected tool:"]
         case .reflect:
-            ["Current phase:", "Conversation summary:"]
+            ["Current phase:", "Recent observations:", "Conversation summary:"]
         default:
             ["System rules:", "Current phase:", "User goal:"]
         }
@@ -147,5 +154,25 @@ struct ContextBuilder: Sendable {
         let limit = max(0, characterLimit - suffix.count)
         let end = text.index(text.startIndex, offsetBy: limit)
         return String(text[..<end]) + suffix
+    }
+
+    private func fit(_ text: String, characterLimit: Int) -> String {
+        guard text.count > characterLimit else { return text }
+        let marker = "\n\nFinal instructions:"
+        guard let markerRange = text.range(of: marker, options: .backwards) else {
+            let end = text.index(text.startIndex, offsetBy: max(0, characterLimit - "\n[truncated]".count))
+            return String(text[..<end]) + "\n[truncated]"
+        }
+
+        let tail = String(text[markerRange.lowerBound...])
+        if tail.count >= characterLimit {
+            let start = tail.index(tail.endIndex, offsetBy: -characterLimit)
+            return String(tail[start...])
+        }
+
+        let separator = "\n[truncated]\n"
+        let prefixBudget = max(0, characterLimit - tail.count - separator.count)
+        let prefixEnd = text.index(text.startIndex, offsetBy: prefixBudget)
+        return String(text[..<prefixEnd]) + separator + tail
     }
 }

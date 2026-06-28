@@ -6,6 +6,9 @@ import Contacts
 #if canImport(EventKit)
 import EventKit
 #endif
+#if canImport(MapKit)
+import MapKit
+#endif
 
 struct ToolResult: Sendable {
     var toolName: String
@@ -13,6 +16,10 @@ struct ToolResult: Sendable {
     var riskLevel: ToolRiskLevel = .low
     var requiresApproval: Bool = false
     var approved: Bool = true
+    var target: String?
+    var statusCode: Int?
+    var latencyMs: Double?
+    var errorCategory: String?
 }
 
 protocol Tool: Sendable {
@@ -58,8 +65,8 @@ struct ToolRegistry: Sendable {
             DateTimeTool(),
             CalculatorTool(),
             DocumentSummaryTool(documentService: documentService),
-            DocumentSearchTool(documentService: documentService),
             MemorySaveTool(memoryService: memoryService),
+            DocumentSearchTool(documentService: documentService),
             MemoryLookupTool(memoryService: memoryService),
             MemoryDeleteTool(memoryService: memoryService),
             ConversationSearchTool(),
@@ -82,7 +89,8 @@ private func networkDisabledResult(toolName: String, riskLevel: ToolRiskLevel) -
         output: "Network tools are disabled in Settings. Enable network access before running this tool.",
         riskLevel: riskLevel,
         requiresApproval: true,
-        approved: true
+        approved: true,
+        errorCategory: "network_disabled"
     )
 }
 
@@ -121,13 +129,35 @@ private func firstHTTPURL(in input: String) -> URL? {
     return url
 }
 
-private func fetchText(url: URL, limit: Int) async throws -> String {
-    let (data, response) = try await URLSession.shared.data(from: url)
-    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-        return "HTTP \(http.statusCode) from \(url.host ?? url.absoluteString)."
+private struct WebFetchSummary: Sendable {
+    var text: String
+    var target: String
+    var statusCode: Int
+    var latencyMs: Double
+}
+
+private func fetchText(url: URL, limit: Int) async throws -> WebFetchSummary {
+    let response = try await AppNetworkConfiguration.client().send(NetworkRequest(
+        url: url,
+        acceptedContentTypes: ["text/html", "text/plain", "application/json", "application/pdf"]
+    ))
+    let target = response.finalURL.host ?? response.finalURL.absoluteString
+    if response.contentType?.contains("application/pdf") == true {
+        return WebFetchSummary(
+            text: "Fetched PDF from \(target) in \(Int(response.latencyMs)) ms. PDF text extraction is not available in this build.",
+            target: target,
+            statusCode: response.statusCode,
+            latencyMs: response.latencyMs
+        )
     }
-    let text = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
-    return String(strippedHTML(text).prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines)
+    let text = response.text
+    let cleaned = response.contentType?.contains("text/html") == true ? strippedHTML(text) : text
+    return WebFetchSummary(
+        text: String(cleaned.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines),
+        target: target,
+        statusCode: response.statusCode,
+        latencyMs: response.latencyMs
+    )
 }
 
 private func strippedHTML(_ input: String) -> String {
@@ -246,7 +276,7 @@ private func reminderDueDateComponents(from input: String, now: Date = .now) -> 
 
 struct ReminderTool: Tool {
     let name = "reminder_manager"
-    let description = "Creates native Reminders entries after user approval, with a local intent fallback."
+    let description = "Creates native Reminders entries after user approval."
     let riskLevel: ToolRiskLevel = .high
 
     var schema: ToolSchema {
@@ -279,16 +309,13 @@ struct ReminderTool: Tool {
         }
         #endif
 
-        let reminder = AgentTaskRecord(runID: request.runID, title: resolvedTitle, notes: "Reminder intent recorded locally after approval because native Reminders access was unavailable or denied.")
-        context.insert(reminder)
-        try context.safeSave()
-        return ToolResult(toolName: name, output: "Recorded approved reminder intent locally: \(reminder.title)", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: "Reminder was not created because native Reminders access is unavailable or permission was denied.", riskLevel: riskLevel, requiresApproval: true, approved: true)
     }
 }
 
 struct CalendarTool: Tool {
     let name = "calendar_manager"
-    let description = "Creates native Calendar events after user approval, with a local intent fallback."
+    let description = "Creates native Calendar events after user approval."
     let riskLevel: ToolRiskLevel = .high
 
     var schema: ToolSchema {
@@ -323,10 +350,7 @@ struct CalendarTool: Tool {
         }
         #endif
 
-        let event = AgentTaskRecord(runID: request.runID, title: resolvedTitle, notes: "Calendar intent recorded locally after approval because native Calendar access was unavailable or denied.")
-        context.insert(event)
-        try context.safeSave()
-        return ToolResult(toolName: name, output: "Recorded approved calendar intent: \(event.title)", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: "Calendar event was not created because native Calendar access is unavailable or permission was denied.", riskLevel: riskLevel, requiresApproval: true, approved: true)
     }
 }
 
@@ -416,13 +440,37 @@ struct WeatherTool: Tool {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
         let location = cleanedInput(request.input, removing: ["weather in", "weather for", "weather", "forecast in", "forecast for", "forecast"])
-        guard !location.isEmpty,
-              let encoded = location.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "https://wttr.in/\(encoded)?format=3") else {
-            return ToolResult(toolName: name, output: "Provide a location for weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        guard !location.isEmpty else {
+            return ToolResult(toolName: name, output: "Provide a location for weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
         }
-        let text = try await fetchText(url: url, limit: 600)
-        return ToolResult(toolName: name, output: text.isEmpty ? "Weather provider returned no summary." : text, riskLevel: riskLevel, requiresApproval: true, approved: true)
+        guard !AppNetworkConfiguration.weatherAPIKey.isEmpty else {
+            return ToolResult(toolName: name, output: "Weather API key is missing. Add an OpenWeather-compatible key in Settings before weather lookup.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+        }
+        guard var components = URLComponents(string: AppNetworkConfiguration.weatherEndpoint) else {
+            return ToolResult(toolName: name, output: "Weather endpoint in Settings is not a valid URL.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+        }
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "q", value: location))
+        queryItems.append(URLQueryItem(name: "appid", value: AppNetworkConfiguration.weatherAPIKey))
+        queryItems.append(URLQueryItem(name: "units", value: AppNetworkConfiguration.weatherUnits))
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            return ToolResult(toolName: name, output: "Weather request could not be built from the configured endpoint.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+        }
+        let response = try await AppNetworkConfiguration.client().send(NetworkRequest(url: url, acceptedContentTypes: ["application/json"]))
+        let weather = try response.decodedJSON(OpenWeatherResponse.self)
+        let description = weather.weather.first?.description ?? "conditions unavailable"
+        let output = "Weather for \(weather.name.isEmpty ? location : weather.name): \(description), \(Int(weather.main.temp.rounded())) degrees, humidity \(weather.main.humidity)%, wind \(String(format: "%.1f", weather.wind?.speed ?? 0)) m/s. Status \(response.statusCode), \(Int(response.latencyMs)) ms."
+        return ToolResult(
+            toolName: name,
+            output: output,
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: response.finalURL.host ?? response.finalURL.absoluteString,
+            statusCode: response.statusCode,
+            latencyMs: response.latencyMs
+        )
     }
 }
 
@@ -442,7 +490,9 @@ struct TextMessageTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
-        let phone = firstPhoneNumber(in: request.input) ?? ""
+        guard let phone = firstPhoneNumber(in: request.input), !phone.isEmpty else {
+            return ToolResult(toolName: name, output: "Provide a phone number to prepare an SMS.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        }
         let body = cleanedInput(request.input, removing: ["send text", "text", "sms", phone])
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let url = "sms:\(phone)\(encodedBody.isEmpty ? "" : "&body=\(encodedBody)")"
@@ -475,7 +525,7 @@ struct PhoneCallTool: Tool {
 
 struct EmailTool: Tool {
     let name = "email_compose"
-    let description = "Prepares a mailto URL after user approval; it does not send automatically."
+    let description = "Prepares a native Mail compose handoff after user approval; it does not send automatically."
     let riskLevel: ToolRiskLevel = .high
 
     var schema: ToolSchema {
@@ -493,9 +543,22 @@ struct EmailTool: Tool {
             return ToolResult(toolName: name, output: "Provide an email address to prepare mail.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
         let body = cleanedInput(request.input, removing: ["send email", "email", "mail", email])
-        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let url = "mailto:\(email)\(encodedBody.isEmpty ? "" : "?body=\(encodedBody)")"
-        return ToolResult(toolName: name, output: "Prepared approved email handoff: \(url). The user must review and send in Mail.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = email
+        if !body.isEmpty {
+            components.queryItems = [URLQueryItem(name: "body", value: body)]
+        }
+        let url = components.url?.absoluteString ?? "mailto:\(email)"
+        let nativeStatus = "The app will present native Mail compose when iOS reports Mail is configured; otherwise it will offer the system Mail URL handoff."
+        return ToolResult(
+            toolName: name,
+            output: "\(nativeStatus) Prepared approved email handoff: \(url). The user must review and send in Mail.",
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: email
+        )
     }
 }
 
@@ -515,10 +578,84 @@ struct MapsTool: Tool {
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
+        guard request.networkAccessAllowed else {
+            return networkDisabledResult(toolName: name, riskLevel: riskLevel)
+        }
         let query = cleanedInput(request.input, removing: ["open map", "map", "directions to", "directions", "navigate to", "navigate", "nearby"])
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let url = "http://maps.apple.com/?q=\(encoded)"
-        return ToolResult(toolName: name, output: "Prepared approved Maps handoff: \(url)", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        guard !query.isEmpty else {
+            return ToolResult(toolName: name, output: "Provide a place, address, or directions destination for Maps.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+        }
+
+        #if canImport(MapKit)
+        let started = ContinuousClock.now
+        let searchRequest = MKLocalSearch.Request()
+        searchRequest.naturalLanguageQuery = query
+        do {
+            let response = try await MKLocalSearch(request: searchRequest).start()
+            let latencyMs = Self.latencyMilliseconds(started.duration(to: ContinuousClock.now))
+            if let item = response.mapItems.first {
+                let coordinate = item.placemark.coordinate
+                let mapsURL = Self.appleMapsURL(query: item.name ?? query, coordinate: coordinate)
+                let target = item.placemark.title ?? item.name ?? query
+                return ToolResult(
+                    toolName: name,
+                    output: "Prepared approved Apple Maps handoff for \(target): \(mapsURL.absoluteString)",
+                    riskLevel: riskLevel,
+                    requiresApproval: true,
+                    approved: true,
+                    target: "maps.apple.com",
+                    statusCode: 200,
+                    latencyMs: latencyMs
+                )
+            }
+
+            let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
+            return ToolResult(
+                toolName: name,
+                output: "MapKit returned no local search result. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
+                riskLevel: riskLevel,
+                requiresApproval: true,
+                approved: true,
+                target: "maps.apple.com",
+                statusCode: 204,
+                latencyMs: latencyMs,
+                errorCategory: "no_results"
+            )
+        } catch {
+            let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
+            return ToolResult(
+                toolName: name,
+                output: "MapKit search failed: \(error.localizedDescription). Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
+                riskLevel: riskLevel,
+                requiresApproval: true,
+                approved: true,
+                target: "maps.apple.com",
+                errorCategory: "service_unavailable"
+            )
+        }
+        #else
+        let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
+        return ToolResult(toolName: name, output: "MapKit is unavailable on this platform. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)", riskLevel: riskLevel, requiresApproval: true, approved: true, target: "maps.apple.com", errorCategory: "platform_unavailable")
+        #endif
+    }
+
+    private static func appleMapsURL(query: String, coordinate: CLLocationCoordinate2D?) -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "maps.apple.com"
+        if let coordinate {
+            components.queryItems = [
+                URLQueryItem(name: "ll", value: "\(coordinate.latitude),\(coordinate.longitude)"),
+                URLQueryItem(name: "q", value: query)
+            ]
+        } else {
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        }
+        return components.url ?? URL(string: "https://maps.apple.com")!
+    }
+
+    private static func latencyMilliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds * 1_000) + Double(duration.components.attoseconds) / 1_000_000_000_000_000
     }
 }
 
@@ -570,8 +707,17 @@ struct WebFetchTool: Tool {
         guard let url = firstHTTPURL(in: request.input) else {
             return ToolResult(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
-        let text = try await fetchText(url: url, limit: 2_000)
-        return ToolResult(toolName: name, output: text.isEmpty ? "Fetched URL but no text content was returned." : text, riskLevel: riskLevel, requiresApproval: true, approved: true)
+        let summary = try await fetchText(url: url, limit: 2_000)
+        return ToolResult(
+            toolName: name,
+            output: summary.text.isEmpty ? "Fetched URL but no text content was returned." : summary.text,
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: summary.target,
+            statusCode: summary.statusCode,
+            latencyMs: summary.latencyMs
+        )
     }
 }
 
@@ -936,12 +1082,12 @@ struct TaskTool: Tool {
 
 struct RemoteNetworkTool: Tool {
     let name = "remote_network"
-    let description = "Remote/network action placeholder. Disabled unless remote features are explicitly enabled."
+    let description = "Runs an approved generic HTTP request using the configured network client."
     let riskLevel: ToolRiskLevel = .high
 
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
-        return lower.contains("web") || lower.contains("network") || lower.contains("remote")
+        return lower.contains("network") || lower.contains("remote http") || lower.range(of: #"^(get|post|put|patch|delete)\s+https?://"#, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
@@ -951,6 +1097,54 @@ struct RemoteNetworkTool: Tool {
         guard request.networkAccessAllowed else {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
-        return ToolResult(toolName: name, output: "Remote/network tools are stubbed and disabled by default.", riskLevel: riskLevel, requiresApproval: true, approved: request.approved)
+        guard let url = firstHTTPURL(in: request.input) else {
+            return ToolResult(toolName: name, output: "Provide an HTTP or HTTPS URL for the remote network request.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        }
+        let method = Self.method(from: request.input)
+        let bodyText = contentAfterKeyword("body", in: request.input)
+        let response = try await AppNetworkConfiguration.client().send(NetworkRequest(
+            url: url,
+            method: method,
+            headers: AppNetworkConfiguration.remoteNetworkHeaders,
+            body: bodyText?.data(using: .utf8),
+            acceptedContentTypes: ["application/json", "text/plain", "text/html"]
+        ))
+        let preview = String((response.contentType?.contains("text/html") == true ? strippedHTML(response.text) : response.text).prefix(1_000))
+        let host = response.finalURL.host ?? url.host ?? url.absoluteString
+        return ToolResult(
+            toolName: name,
+            output: "HTTP \(method.rawValue) \(host) completed with status \(response.statusCode) in \(Int(response.latencyMs)) ms.\n\(preview)",
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: request.approved,
+            target: host,
+            statusCode: response.statusCode,
+            latencyMs: response.latencyMs
+        )
+    }
+
+    private static func method(from input: String) -> HTTPMethod {
+        let first = input.split(separator: " ").first.map { String($0).uppercased() }
+        return HTTPMethod.allCases.first { $0.rawValue == first } ?? .get
+    }
+}
+
+private struct OpenWeatherResponse: Decodable {
+    var name: String
+    var weather: [Condition]
+    var main: Main
+    var wind: Wind?
+
+    struct Condition: Decodable {
+        var description: String
+    }
+
+    struct Main: Decodable {
+        var temp: Double
+        var humidity: Int
+    }
+
+    struct Wind: Decodable {
+        var speed: Double
     }
 }
