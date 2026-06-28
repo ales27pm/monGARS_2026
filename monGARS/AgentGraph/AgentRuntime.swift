@@ -375,7 +375,7 @@ struct AgentLoop: Sendable {
         context: ModelContext
     ) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            Task { @MainActor in
                 let startedAt = Date()
                 var state = AgentLoopState(runID: UUID(), goal: goal)
                 let runRecord = AgentRunRecord(id: state.runID, conversationID: conversationID, goal: goal, autonomyLevelRawValue: options.autonomyLevel.rawValue, maxSteps: options.maxSteps)
@@ -410,7 +410,7 @@ struct AgentLoop: Sendable {
 
     func resume(run: AgentRunRecord, provider: any LLMProvider, options: AgentRuntimeOptions? = nil, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            Task { @MainActor in
                 do {
                     let descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
                     let checkpoint = try context.fetch(descriptor).first { $0.runID == run.id && $0.stateData != nil }
@@ -693,8 +693,7 @@ struct AgentLoop: Sendable {
 
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
         if let toolOutput = state.toolResults.last {
-            let reflection = state.reflection.isEmpty ? "" : "\n\nReflection: \(state.reflection)"
-            return "\(toolOutput)\(reflection)"
+            return toolOutput
         }
         let request = LLMRequest(prompt: contextPackage.prompt, conversationContext: [goal], retrievedContext: state.retrievedContext)
         let response = try await provider.complete(request: request)

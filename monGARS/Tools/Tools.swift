@@ -3,6 +3,9 @@ import SwiftData
 #if canImport(Contacts)
 import Contacts
 #endif
+#if canImport(CoreLocation)
+import CoreLocation
+#endif
 #if canImport(EventKit)
 import EventKit
 #endif
@@ -53,11 +56,13 @@ struct ToolRegistry: Sendable {
         ToolRegistry(tools: [
             TextMessageTool(),
             PhoneCallTool(),
+            EmailInboxTool(),
             EmailTool(),
             ReminderTool(),
             CalendarTool(),
             ContactsTool(),
             WeatherTool(),
+            CurrentLocationTool(),
             MapsTool(),
             WebViewTool(),
             WebFetchTool(),
@@ -127,6 +132,13 @@ private func firstHTTPURL(in input: String) -> URL? {
         return nil
     }
     return url
+}
+
+private func normalizedIntent(_ input: String) -> String {
+    input.lowercased()
+        .replacingOccurrences(of: #"[^\p{L}\p{N}\s]"#, with: " ", options: .regularExpression)
+        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private struct WebFetchSummary: Sendable {
@@ -266,6 +278,113 @@ private func reminderDueDateComponents(from input: String, now: Date = .now) -> 
         return calendar.dateComponents([.year, .month, .day], from: now)
     }
     return nil
+}
+#endif
+
+#if canImport(CoreLocation)
+private enum CurrentLocationError: LocalizedError {
+    case servicesDisabled
+    case permissionDenied
+    case unavailable
+    case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .servicesDisabled:
+            "Location Services are disabled. Enable Location Services in iOS Settings to use current-location tools."
+        case .permissionDenied:
+            "Location permission was denied. Allow monGARS location access in iOS Settings to use this tool."
+        case .unavailable:
+            "Current location is unavailable on this device right now."
+        case .timedOut:
+            "Current location timed out. Check Location Services and try again."
+        }
+    }
+}
+
+@MainActor
+private final class CurrentLocationProbe: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var continuation: CheckedContinuation<CLLocation, Error>?
+    private var timeoutTask: Task<Void, Never>?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    func requestLocation(timeoutSeconds: Double = 12) async throws -> CLLocation {
+        guard CLLocationManager.locationServicesEnabled() else {
+            throw CurrentLocationError.servicesDisabled
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            self.timeoutTask = Task { [weak self] in
+                let nanoseconds = UInt64(timeoutSeconds * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                await MainActor.run {
+                    self?.finish(.failure(CurrentLocationError.timedOut))
+                }
+            }
+
+            switch manager.authorizationStatus {
+            case .notDetermined:
+                manager.requestWhenInUseAuthorization()
+            case .authorizedAlways, .authorizedWhenInUse:
+                manager.requestLocation()
+            case .denied, .restricted:
+                finish(.failure(CurrentLocationError.permissionDenied))
+            @unknown default:
+                finish(.failure(CurrentLocationError.unavailable))
+            }
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.requestLocation()
+        case .denied, .restricted:
+            finish(.failure(CurrentLocationError.permissionDenied))
+        case .notDetermined:
+            break
+        @unknown default:
+            finish(.failure(CurrentLocationError.unavailable))
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else {
+            finish(.failure(CurrentLocationError.unavailable))
+            return
+        }
+        finish(.success(location))
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        finish(.failure(error))
+    }
+
+    private func finish(_ result: Result<CLLocation, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+
+        switch result {
+        case .success(let location):
+            continuation.resume(returning: location)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+private func currentDeviceLocation() async throws -> CLLocation {
+    let probe = await MainActor.run { CurrentLocationProbe() }
+    return try await probe.requestLocation()
 }
 #endif
 
@@ -513,6 +632,41 @@ struct PhoneCallTool: Tool {
     }
 }
 
+struct EmailInboxTool: Tool {
+    let name = "email_inbox"
+    let description = "Handles requests to read email inbox content with an honest native iOS limitation."
+    let riskLevel: ToolRiskLevel = .high
+
+    var schema: ToolSchema {
+        ToolSchema(inputDescription: "Inbox-read request such as latest email or unread email.", examples: ["read my latest email"])
+    }
+
+    func canHandle(_ input: String) -> Bool {
+        let lower = normalizedIntent(input)
+        let asksForEmail = lower.contains("email") || lower.contains("mail") || lower.contains("inbox")
+        let asksToRead = lower.contains("read")
+            || lower.contains("latest")
+            || lower.contains("last")
+            || lower.contains("newest")
+            || lower.contains("unread")
+            || lower.contains("show")
+        return asksForEmail && asksToRead
+    }
+
+    func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
+        try requirePrivacyApproval(request, toolName: name)
+        return ToolResult(
+            toolName: name,
+            output: "I cannot read your Apple Mail inbox because iOS does not expose Mail messages to third-party apps. Share or import the email text/document and I can summarize it locally.",
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: "mail",
+            errorCategory: "platform_unavailable"
+        )
+    }
+}
+
 struct EmailTool: Tool {
     let name = "email_compose"
     let description = "Prepares a native Mail compose handoff after user approval; it does not send automatically."
@@ -552,6 +706,99 @@ struct EmailTool: Tool {
     }
 }
 
+struct CurrentLocationTool: Tool {
+    let name = "current_location"
+    let description = "Requests the device current location after user approval and can prepare an Apple Maps handoff."
+    let riskLevel: ToolRiskLevel = .high
+
+    var schema: ToolSchema {
+        ToolSchema(inputDescription: "Current location request.", examples: ["where am I", "show me where I am on map"])
+    }
+
+    func canHandle(_ input: String) -> Bool {
+        let lower = normalizedIntent(input)
+        return lower == "where am i"
+            || lower == "where i am"
+            || lower.contains("where am i")
+            || lower.contains("where i am")
+            || lower.contains("my current location")
+            || lower.contains("current location")
+            || lower.contains("locate me")
+            || lower.contains("show me where i am")
+    }
+
+    func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
+        try requirePrivacyApproval(request, toolName: name)
+        #if canImport(CoreLocation)
+        let started = ContinuousClock.now
+        do {
+            let location = try await currentDeviceLocation()
+            let latencyMs = Self.latencyMilliseconds(started.duration(to: ContinuousClock.now))
+            let coordinate = location.coordinate
+            let accuracy = max(0, Int(location.horizontalAccuracy.rounded()))
+            var output = "Current location: \(String(format: "%.5f", coordinate.latitude)), \(String(format: "%.5f", coordinate.longitude))"
+            if accuracy > 0 {
+                output += " (accuracy about \(accuracy) m)"
+            }
+            if Self.requestsMap(request.input) {
+                output += ". Prepared approved Apple Maps handoff: \(Self.appleMapsURL(for: coordinate).absoluteString)"
+            }
+            return ToolResult(
+                toolName: name,
+                output: output,
+                riskLevel: riskLevel,
+                requiresApproval: true,
+                approved: true,
+                target: Self.requestsMap(request.input) ? "maps.apple.com" : "CoreLocation",
+                latencyMs: latencyMs
+            )
+        } catch {
+            return ToolResult(
+                toolName: name,
+                output: "Current location failed: \(error.localizedDescription)",
+                riskLevel: riskLevel,
+                requiresApproval: true,
+                approved: true,
+                target: "CoreLocation",
+                errorCategory: "permission_or_location_unavailable"
+            )
+        }
+        #else
+        return ToolResult(
+            toolName: name,
+            output: "Current location is unavailable on this platform.",
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: "CoreLocation",
+            errorCategory: "platform_unavailable"
+        )
+        #endif
+    }
+
+    private static func requestsMap(_ input: String) -> Bool {
+        let lower = normalizedIntent(input)
+        return lower.contains("map") || lower.contains("maps")
+    }
+
+    #if canImport(CoreLocation)
+    private static func appleMapsURL(for coordinate: CLLocationCoordinate2D) -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "maps.apple.com"
+        components.queryItems = [
+            URLQueryItem(name: "ll", value: "\(coordinate.latitude),\(coordinate.longitude)"),
+            URLQueryItem(name: "q", value: "Current Location")
+        ]
+        return components.url ?? URL(string: "https://maps.apple.com")!
+    }
+
+    private static func latencyMilliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds * 1_000) + Double(duration.components.attoseconds) / 1_000_000_000_000_000
+    }
+    #endif
+}
+
 struct MapsTool: Tool {
     let name = "maps_lookup"
     let description = "Prepares an Apple Maps search/directions URL after user approval."
@@ -562,8 +809,14 @@ struct MapsTool: Tool {
     }
 
     func canHandle(_ input: String) -> Bool {
-        let lower = input.lowercased()
-        return lower.contains("map ") || lower.contains("directions") || lower.contains("navigate") || lower.contains("nearby")
+        let lower = normalizedIntent(input)
+        return lower.contains("map ")
+            || lower.hasPrefix("map ")
+            || lower.contains("maps")
+            || lower.contains("directions")
+            || lower.contains("navigate")
+            || lower.contains("nearby")
+            || lower.contains("show me where")
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {

@@ -112,11 +112,13 @@ struct MonGARSTests {
         let expected: Set<String> = [
             "text_message",
             "phone_call",
+            "email_inbox",
             "email_compose",
             "reminder_manager",
             "calendar_manager",
             "contacts_lookup",
             "weather_lookup",
+            "current_location",
             "maps_lookup",
             "integrated_webview",
             "web_fetch",
@@ -267,11 +269,14 @@ struct MonGARSTests {
         let cases: [(String, String)] = [
             ("text 5551234567 hello", "text_message"),
             ("call 5551234567", "phone_call"),
+            ("read my latest email", "email_inbox"),
             ("email sam@example.com hello", "email_compose"),
             ("remind me to check the oven", "reminder_manager"),
             ("schedule team sync tomorrow", "calendar_manager"),
             ("find contact Sarah", "contacts_lookup"),
             ("weather in Montreal", "weather_lookup"),
+            ("where am I", "current_location"),
+            ("show me where I am on map", "current_location"),
             ("map nearest coffee shop", "maps_lookup"),
             ("open webview https://example.com", "integrated_webview"),
             ("fetch https://example.com", "web_fetch"),
@@ -328,11 +333,13 @@ struct MonGARSTests {
         let tools: [(any Tool, String)] = [
             (TextMessageTool(), "text 5551234567 hello"),
             (PhoneCallTool(), "call 5551234567"),
+            (EmailInboxTool(), "read my latest email"),
             (EmailTool(), "email sam@example.com hello"),
             (ReminderTool(), "remind me to check the oven"),
             (CalendarTool(), "schedule team sync tomorrow"),
             (ContactsTool(), "find contact Sarah"),
             (WeatherTool(), "weather in Montreal"),
+            (CurrentLocationTool(), "where am I"),
             (MapsTool(), "map nearest coffee shop"),
             (WebViewTool(), "open webview https://example.com"),
             (WebFetchTool(), "fetch https://example.com"),
@@ -382,6 +389,17 @@ struct MonGARSTests {
         let request = ToolExecutionRequest(runID: UUID(), input: "text hello", autonomyLevel: .assisted, approved: true)
         let result = try await TextMessageTool().execute(request: request, context: context)
         #expect(result.output.contains("Provide a phone number"))
+    }
+
+    @Test func emailInboxRequestsFailHonestlyOnNativeIOS() async throws {
+        let (_, context) = makeContext()
+        let request = ToolExecutionRequest(runID: UUID(), input: "read my latest email", autonomyLevel: .assisted, approved: true)
+        let result = try await EmailInboxTool().execute(request: request, context: context)
+
+        #expect(result.toolName == "email_inbox")
+        #expect(result.errorCategory == "platform_unavailable")
+        #expect(result.output.contains("iOS does not expose Mail messages"))
+        #expect(!result.output.localizedCaseInsensitiveContains("chatbot created by Apple"))
     }
 
     @Test func approvedLocalFileToolStaysInAgentWorkspace() async throws {

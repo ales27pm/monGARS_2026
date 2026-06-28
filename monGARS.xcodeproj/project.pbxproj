@@ -328,6 +328,7 @@
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "monGARS creates Calendar events only after explicit approval.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "monGARS uses Calendar access only after approval to create or inspect calendar items.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "monGARS uses Contacts only after approval to search local contact details.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "monGARS uses your location only after approval to answer current-location requests and prepare Maps handoffs.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "monGARS uses the microphone only when you ask to dictate a message.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "monGARS creates Reminders only after explicit approval.";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "monGARS uses Reminders access only after approval to create or inspect reminders.";
@@ -364,6 +365,7 @@
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "monGARS creates Calendar events only after explicit approval.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "monGARS uses Calendar access only after approval to create or inspect calendar items.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "monGARS uses Contacts only after approval to search local contact details.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "monGARS uses your location only after approval to answer current-location requests and prepare Maps handoffs.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "monGARS uses the microphone only when you ask to dictate a message.";
 				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "monGARS creates Reminders only after explicit approval.";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "monGARS uses Reminders access only after approval to create or inspect reminders.";
