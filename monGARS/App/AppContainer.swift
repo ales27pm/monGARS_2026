@@ -42,21 +42,9 @@ final class AppContainer {
         diagnostics.lastError = persistenceRecoveryMessage
     }
 
-    static let schemaModels: [any PersistentModel.Type] = [
-        Conversation.self,
-        ChatMessage.self,
-        MemoryRecord.self,
-        DocumentRecord.self,
-        DocumentChunkRecord.self,
-        AgentCheckpointRecord.self,
-        AgentRunRecord.self,
-        AgentTraceRecord.self,
-        ToolCallRecord.self,
-        ApprovalRequestRecord.self,
-        AgentTaskRecord.self,
-        RepoIndexRecord.self,
-        RepoSymbolRecord.self
-    ]
+    static var schemaModels: [any PersistentModel.Type] {
+        MonGARSSchemaV2.models
+    }
 
     func llmProvider() -> any LLMProvider {
         switch settingsStore.providerMode {
@@ -94,7 +82,7 @@ final class AppContainer {
     private static func makeModelContainer(schema: Schema, inMemory: Bool) -> (container: ModelContainer, recoveryMessage: String?) {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: inMemory)
         do {
-            return (try ModelContainer(for: schema, configurations: [configuration]), nil)
+            return (try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [configuration]), nil)
         } catch {
             guard !inMemory else {
                 return makeInMemoryFallback(schema: schema, originalError: error)
@@ -102,7 +90,7 @@ final class AppContainer {
 
             let recovery = quarantineDefaultStoreFiles()
             do {
-                let container = try ModelContainer(for: schema, configurations: [configuration])
+                let container = try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [configuration])
                 let message = "Recovered local storage after SwiftData startup error: \(error.localizedDescription). \(recovery)"
                 return (container, message)
             } catch {
@@ -113,7 +101,7 @@ final class AppContainer {
 
     private static func makeInMemoryFallback(schema: Schema, originalError: Error) -> (container: ModelContainer, recoveryMessage: String?) {
         do {
-            let fallback = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+            let fallback = try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
             return (fallback, "Using temporary in-memory storage because persistent storage could not start: \(originalError.localizedDescription)")
         } catch {
             preconditionFailure("Unable to create any SwiftData container: \(error)")
