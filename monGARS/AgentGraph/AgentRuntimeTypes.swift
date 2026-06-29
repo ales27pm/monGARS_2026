@@ -149,6 +149,7 @@ enum AgentRuntimeError: LocalizedError, Equatable {
     case maxStepsReached
     case approvalRequired(String)
     case approvalRejected(String)
+    case approvalExpired(String)
     case approvalNotFound
     case resumeCheckpointUnavailable
 
@@ -160,6 +161,7 @@ enum AgentRuntimeError: LocalizedError, Equatable {
         case .maxStepsReached: "The agent reached its maximum step limit."
         case .approvalRequired(let action): "Approval is required before running \(action)."
         case .approvalRejected(let action): "Approval was rejected for \(action)."
+        case .approvalExpired(let action): "Approval expired before running \(action). Restart the run to approve a fresh request."
         case .approvalNotFound: "The approval request could not be found."
         case .resumeCheckpointUnavailable: "No durable checkpoint was available for this run."
         }
