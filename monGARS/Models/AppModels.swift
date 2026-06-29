@@ -240,6 +240,7 @@ final class ToolCallRecord {
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
+    var normalizedArgumentsJSON: String = "{}"
     var payloadHash: String = ""
     var statusCode: Int?
     var latencyMs: Double
@@ -258,6 +259,7 @@ final class ToolCallRecord {
         requiresApproval: Bool,
         approved: Bool,
         target: String? = nil,
+        normalizedArgumentsJSON: String = "{}",
         payloadHash: String = "",
         statusCode: Int? = nil,
         latencyMs: Double = 0,
@@ -277,11 +279,16 @@ final class ToolCallRecord {
         self.requiresApproval = requiresApproval
         self.approved = approved
         self.target = target
+        let canonicalArguments = ApprovalTupleHasher.normalizedJSON(normalizedArgumentsJSON)
+        let resolvedArguments = canonicalArguments == "{}"
+            ? ApprovalTupleHasher.normalizedArguments(toolName: toolName, input: input, target: target)
+            : canonicalArguments
+        self.normalizedArgumentsJSON = resolvedArguments
         self.payloadHash = payloadHash.isEmpty
             ? ApprovalTupleHasher.payloadHash(
                 toolName: toolName,
                 target: target,
-                normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: toolName, input: input, target: target),
+                normalizedArgumentsJSON: resolvedArguments,
                 riskLevel: normalizedRisk.rawValue,
                 sessionID: resolvedSessionID
             )
@@ -371,6 +378,21 @@ final class ApprovalRequestRecord {
             riskLevel: riskLevel,
             expiresAt: expiresAt,
             sessionID: sessionID,
+            userVisibleDiff: userVisibleDiff
+        )
+    }
+
+    func presentation() -> ApprovalPresentation {
+        ApprovalPresentation(
+            approvalID: id,
+            runID: runID,
+            toolName: toolName,
+            target: target,
+            riskLevel: riskLevel,
+            payloadHash: payloadHash,
+            sessionID: sessionID,
+            expiresAt: expiresAt,
+            reason: reason,
             userVisibleDiff: userVisibleDiff
         )
     }

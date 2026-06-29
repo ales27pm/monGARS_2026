@@ -29,12 +29,16 @@ struct AgentExecutor: Sendable {
     let toolRouter: ToolRouter
 
     func selectedTool(for goal: String) -> (any Tool)? {
-        toolRouter.route(input: goal)
+        routeDecision(for: goal, autonomyLevel: .assisted).tool
     }
 
-    func execute(goal: String, runID: UUID, autonomyLevel: AutonomyLevel, approved: Bool, networkAccessAllowed: Bool, context: ModelContext) async throws -> ToolResult? {
+    func routeDecision(for goal: String, autonomyLevel: AutonomyLevel) -> ToolRouteDecision {
+        toolRouter.routeDecision(input: goal, autonomyLevel: autonomyLevel)
+    }
+
+    func execute(decision: ToolRouteDecision, goal: String, runID: UUID, autonomyLevel: AutonomyLevel, approved: Bool, networkAccessAllowed: Bool, context: ModelContext) async throws -> ToolResult? {
         let request = ToolExecutionRequest(runID: runID, input: goal, autonomyLevel: autonomyLevel, approved: approved, networkAccessAllowed: networkAccessAllowed)
-        return try await toolRouter.execute(request: request, context: context)
+        return try await toolRouter.execute(decision: decision, request: request, context: context)
     }
 }
 
@@ -130,6 +134,7 @@ private struct AgentCheckpointSnapshot: Sendable {
 
 private struct ToolCallSnapshot: Sendable {
     var runID: UUID
+    var sessionID: UUID
     var toolName: String
     var input: String
     var output: String
@@ -138,6 +143,8 @@ private struct ToolCallSnapshot: Sendable {
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
+    var normalizedArgumentsJSON: String
+    var payloadHash: String
     var statusCode: Int?
     var latencyMs: Double
     var errorCategory: String?
@@ -190,9 +197,22 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         }
     }
 
-    func appendToolCall(runID: UUID, input: String, result: ToolResult) {
+    func appendToolCall(runID: UUID, input: String, result: ToolResult, sessionID: UUID? = nil, normalizedArgumentsJSON: String? = nil, payloadHash: String? = nil) {
+        let resolvedSessionID = sessionID ?? runID
+        let rawTarget = result.target
+        let resolvedArguments = normalizedArgumentsJSON
+            .map(ApprovalTupleHasher.normalizedJSON)
+            ?? ApprovalTupleHasher.normalizedArguments(toolName: result.toolName, input: input, target: rawTarget)
+        let resolvedPayloadHash = payloadHash ?? ApprovalTupleHasher.payloadHash(
+            toolName: result.toolName,
+            target: rawTarget,
+            normalizedArgumentsJSON: resolvedArguments,
+            riskLevel: result.riskLevel.rawValue,
+            sessionID: resolvedSessionID
+        )
         let snapshot = ToolCallSnapshot(
             runID: runID,
+            sessionID: resolvedSessionID,
             toolName: result.toolName,
             input: DiagnosticsRedactor.redact(input, maxLength: 500),
             output: DiagnosticsRedactor.redact(result.output, maxLength: 700),
@@ -201,6 +221,8 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             requiresApproval: result.requiresApproval,
             approved: result.approved,
             target: DiagnosticsRedactor.redactOptional(result.target, maxLength: 160),
+            normalizedArgumentsJSON: resolvedArguments,
+            payloadHash: resolvedPayloadHash,
             statusCode: result.statusCode,
             latencyMs: result.latencyMs ?? 0,
             errorCategory: result.errorCategory,
@@ -210,6 +232,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             if let inMemoryContext {
                 inMemoryContext.insert(ToolCallRecord(
                     runID: snapshot.runID,
+                    sessionID: snapshot.sessionID,
                     toolName: snapshot.toolName,
                     input: snapshot.input,
                     output: snapshot.output,
@@ -218,6 +241,8 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     requiresApproval: snapshot.requiresApproval,
                     approved: snapshot.approved,
                     target: snapshot.target,
+                    normalizedArgumentsJSON: snapshot.normalizedArgumentsJSON,
+                    payloadHash: snapshot.payloadHash,
                     statusCode: snapshot.statusCode,
                     latencyMs: snapshot.latencyMs,
                     errorCategory: snapshot.errorCategory,
@@ -254,6 +279,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         for toolCall in payload.2 {
             context.insert(ToolCallRecord(
                 runID: toolCall.runID,
+                sessionID: toolCall.sessionID,
                 toolName: toolCall.toolName,
                 input: toolCall.input,
                 output: toolCall.output,
@@ -262,6 +288,8 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                 requiresApproval: toolCall.requiresApproval,
                 approved: toolCall.approved,
                 target: toolCall.target,
+                normalizedArgumentsJSON: toolCall.normalizedArgumentsJSON,
+                payloadHash: toolCall.payloadHash,
                 statusCode: toolCall.statusCode,
                 latencyMs: toolCall.latencyMs,
                 errorCategory: toolCall.errorCategory,
@@ -297,6 +325,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     requiresApproval: toolCall.requiresApproval,
                     approved: toolCall.approved,
                     target: toolCall.target,
+                    normalizedArgumentsJSON: toolCall.normalizedArgumentsJSON,
                     payloadHash: toolCall.payloadHash,
                     statusCode: toolCall.statusCode,
                     latencyMs: toolCall.latencyMs,
@@ -393,10 +422,29 @@ struct AgentLoop: Sendable {
             try await runPhase(.plan, state: &state, runRecord: runRecord, context: context, continuation: continuation) { planMessage }
         }
 
-        let tool = executor.selectedTool(for: goal)
+        let routeDecision = executor.routeDecision(for: goal, autonomyLevel: options.autonomyLevel)
+        let tool = routeDecision.tool
         if needsPhase(.selectTool, state: state) {
             state.selectedToolName = tool?.name
-            try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { tool.map { "Selected tool: \($0.name)" } ?? "No tool required." }
+            try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
+                if routeDecision.abstained, isNoToolRoute(routeDecision) {
+                    return "No tool required."
+                }
+                if routeDecision.abstained {
+                    return "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
+                }
+                return routeDecision.toolName.map { "Selected tool: \($0). \(routeDecision.anchoredJustification)" } ?? "No tool required."
+            }
+        }
+
+        if routeDecision.abstained, !isNoToolRoute(routeDecision), needsPhase(.executeTool, state: state) {
+            let message = "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
+            state.toolResults.append(message)
+            try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { message }
+            let observation = observer.observe(toolResult: nil, retrievedContext: state.retrievedContext)
+            let observationMessage = "\(message) \(observation)"
+            state.observations.append(observationMessage)
+            try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observationMessage }
         }
 
         if let tool, needsPhase(.executeTool, state: state) {
@@ -429,10 +477,18 @@ struct AgentLoop: Sendable {
                 }
 
                 _ = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .executeTool, selectedToolName: tool.name, selectedToolSchema: tool.schema, budget: provider.capabilities.maxContextTokens)
-                let result = try await executor.execute(goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, networkAccessAllowed: options.networkToolsEnabled, context: context)
+                let result = try await executor.execute(decision: routeDecision, goal: goal, runID: state.runID, autonomyLevel: options.autonomyLevel, approved: true, networkAccessAllowed: options.networkToolsEnabled, context: context)
                 if let result {
                     state.toolResults.append(result.output)
-                    telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
+                    let approval = try? approvalRecord(runID: state.runID, toolName: result.toolName, context: context)
+                    telemetryBuffer.appendToolCall(
+                        runID: state.runID,
+                        input: goal,
+                        result: result,
+                        sessionID: approval?.sessionID,
+                        normalizedArgumentsJSON: approval?.normalizedArgumentsJSON,
+                        payloadHash: approval?.payloadHash
+                    )
                 }
                 try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { result?.output ?? "Tool produced no output." }
                 let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
@@ -534,7 +590,7 @@ struct AgentLoop: Sendable {
             runRecord.requiresApproval = true
             runRecord.updatedAt = .now
             try context.safeSave()
-            continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
+            continuation.yield(.approvalRequired(approval.presentation()))
             let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
             if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue { throw AgentRuntimeError.cancelled }
             runRecord.requiresApproval = false
@@ -571,7 +627,7 @@ struct AgentLoop: Sendable {
         try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
         try telemetryBuffer.flush(runID: state.runID, to: context)
 
-        continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
+        continuation.yield(.approvalRequired(approval.presentation()))
         let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
         if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue { throw AgentRuntimeError.cancelled }
         runRecord.requiresApproval = false
@@ -630,6 +686,13 @@ struct AgentLoop: Sendable {
 
     private func requiresApproval(tool: any Tool, autonomyLevel: AutonomyLevel) -> Bool {
         ToolApprovalPolicy.requiresApproval(tool: tool, autonomyLevel: autonomyLevel)
+    }
+
+    private func isNoToolRoute(_ decision: ToolRouteDecision) -> Bool {
+        decision.abstained
+            && decision.competingToolName == nil
+            && decision.competingConfidence == nil
+            && decision.anchoredJustification.localizedCaseInsensitiveContains("No registered tool matched")
     }
 
     private func finishFailure(_ status: AgentRunStatus, state: AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) {

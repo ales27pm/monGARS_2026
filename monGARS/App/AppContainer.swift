@@ -41,6 +41,7 @@ final class AppContainer {
             reflector: AgentReflector(),
             contextBuilder: ContextBuilder(memoryService: memoryService, documentService: documentService)
         )
+        AuditMetadataBackfillService.run(context: ModelContext(modelContainer))
         diagnostics.lastError = persistenceRecoveryMessage
     }
 

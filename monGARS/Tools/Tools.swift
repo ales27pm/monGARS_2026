@@ -1252,13 +1252,18 @@ struct ToolRouter: Sendable {
     }
 
     func execute(input: String, context: ModelContext) async throws -> ToolResult? {
-        guard let tool = route(input: input) else { return nil }
-        return try await tool.run(input: input, context: context)
+        let decision = routeDecision(input: input, autonomyLevel: .assisted)
+        guard let tool = decision.tool else { return nil }
+        if decision.requiresApproval {
+            throw AgentRuntimeError.approvalRequired(decision.toolName ?? tool.name)
+        }
+        let request = ToolExecutionRequest(runID: UUID(), input: input, autonomyLevel: .assisted, approved: false)
+        return try await tool.execute(request: request, context: context)
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult? {
-        guard let tool = route(input: request.input) else { return nil }
-        return try await tool.execute(request: request, context: context)
+        let decision = routeDecision(input: request.input, autonomyLevel: request.autonomyLevel)
+        return try await execute(decision: decision, request: request, context: context)
     }
 }
 

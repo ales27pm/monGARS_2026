@@ -115,13 +115,17 @@ struct AgentGraph: Sendable {
     static func makeDefault(toolRouter: ToolRouter) -> AgentGraph {
         let route = AgentNode(id: "route") { state, execution in
             var next = state
-            next.selectedToolName = execution.toolRouter.route(input: state.userInput)?.name
+            let decision = execution.toolRouter.routeDecision(input: state.userInput)
+            next.selectedToolName = decision.toolName
             return next
         }
 
         let tool = AgentNode(id: "tool") { state, execution in
             var next = state
-            if let result = try await execution.toolRouter.execute(input: state.userInput, context: execution.context) {
+            let decision = execution.toolRouter.routeDecision(input: state.userInput)
+            if decision.requiresApproval {
+                next.toolOutput = AgentRuntimeError.approvalRequired(decision.toolName ?? "tool").localizedDescription
+            } else if let result = try await execution.toolRouter.execute(input: state.userInput, context: execution.context) {
                 next.toolOutput = result.output
                 await execution.event(.toolCall(tool: result.toolName, input: state.userInput, output: result.output))
             }
@@ -184,12 +188,16 @@ struct AgentGraph: Sendable {
         }
         let selectTool = simpleNode("SelectTool") { state, execution in
             var next = state
-            next.selectedToolName = execution.toolRouter.route(input: state.userInput)?.name
+            let decision = execution.toolRouter.routeDecision(input: state.userInput)
+            next.selectedToolName = decision.toolName
             return next
         }
         let executeTool = simpleNode("ExecuteTool") { state, execution in
             var next = state
-            if let result = try await execution.toolRouter.execute(input: state.userInput, context: execution.context) {
+            let decision = execution.toolRouter.routeDecision(input: state.userInput)
+            if decision.requiresApproval {
+                next.toolOutput = AgentRuntimeError.approvalRequired(decision.toolName ?? "tool").localizedDescription
+            } else if let result = try await execution.toolRouter.execute(input: state.userInput, context: execution.context) {
                 next.toolOutput = result.output
                 await execution.event(.toolCall(tool: result.toolName, input: state.userInput, output: result.output))
             }

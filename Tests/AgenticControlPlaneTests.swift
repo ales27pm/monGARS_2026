@@ -54,6 +54,22 @@ struct AgenticControlPlaneTests {
         #expect(!lookup.abstained)
     }
 
+    @Test func legacyRouterExecuteDoesNotBypassApprovalForHighRiskTool() async throws {
+        let (_, context) = makeContext()
+        let probe = ToolExecutionProbe()
+        let router = ToolRouter(registry: ToolRegistry(tools: [ProbeHighRiskTool(probe: probe)]))
+
+        var blockedToolName: String?
+        do {
+            _ = try await router.execute(input: "probe high risk action", context: context)
+        } catch AgentRuntimeError.approvalRequired(let toolName) {
+            blockedToolName = toolName
+        }
+
+        #expect(blockedToolName == "probe_high_risk")
+        #expect(!probe.didExecute)
+    }
+
     @Test func immutableApprovalTupleHashChangesWhenArgumentsChange() {
         let sessionID = UUID()
         let first = ApprovalTuple(
@@ -151,6 +167,45 @@ struct AgenticControlPlaneTests {
         #expect(record.payloadHash == record.approvalTuple().payloadHash)
     }
 
+    @Test func auditMetadataBackfillRepairsLegacyRows() throws {
+        let (_, context) = makeContext()
+        let runID = UUID()
+        let approval = ApprovalRequestRecord(runID: runID, actionName: "web_fetch", reason: "Legacy approval.")
+        approval.toolName = ""
+        approval.normalizedArgumentsJSON = "{}"
+        approval.payloadHash = ""
+        approval.userVisibleDiff = ""
+        approval.expiresAt = Date(timeIntervalSince1970: 0)
+        let toolCall = ToolCallRecord(
+            runID: runID,
+            toolName: "web_fetch",
+            input: "fetch [REDACTED]",
+            output: "ok",
+            riskLevel: ToolRiskLevel.high.rawValue,
+            outcomeRawValue: ToolOutcome.success.rawValue,
+            requiresApproval: true,
+            approved: true,
+            target: "example.com"
+        )
+        toolCall.normalizedArgumentsJSON = "{}"
+        toolCall.payloadHash = ""
+        context.insert(approval)
+        context.insert(toolCall)
+        try context.save()
+
+        AuditMetadataBackfillService.run(context: context)
+
+        #expect(approval.toolName == "web_fetch")
+        #expect(approval.sessionID == runID)
+        #expect(approval.normalizedArgumentsJSON != "{}")
+        #expect(!approval.payloadHash.isEmpty)
+        #expect(approval.userVisibleDiff == "Legacy approval.")
+        #expect(toolCall.sessionID == runID)
+        #expect(toolCall.normalizedArgumentsJSON != "{}")
+        #expect(!toolCall.payloadHash.isEmpty)
+        #expect(toolCall.errorCategory == "legacy_audit_hash_best_effort")
+    }
+
     @Test func toolCallPayloadHashUsesExplicitSessionID() {
         let runID = UUID()
         let sessionID = UUID()
@@ -177,6 +232,7 @@ struct AgenticControlPlaneTests {
 
         #expect(record.sessionID == sessionID)
         #expect(record.payloadHash == expected)
+        #expect(record.normalizedArgumentsJSON == ApprovalTupleHasher.normalizedArguments(toolName: "web_fetch", input: input, target: "example.com"))
     }
 
     @Test func runtimeRejectsExpiredApprovalCentrally() throws {
@@ -313,5 +369,25 @@ struct AgenticControlPlaneTests {
 
         #expect(modelNames.contains("RepoIndexRecord"))
         #expect(modelNames.contains("RepoSymbolRecord"))
+    }
+}
+
+private final class ToolExecutionProbe: @unchecked Sendable {
+    var didExecute = false
+}
+
+private struct ProbeHighRiskTool: Tool {
+    let probe: ToolExecutionProbe
+    let name = "probe_high_risk"
+    let description = "Probe high-risk execution for approval tests."
+    let riskLevel: ToolRiskLevel = .high
+
+    func canHandle(_ input: String) -> Bool {
+        input.localizedCaseInsensitiveContains("probe high risk")
+    }
+
+    func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
+        probe.didExecute = true
+        return ToolResult(toolName: name, output: "executed", riskLevel: riskLevel, requiresApproval: true, approved: request.approved)
     }
 }

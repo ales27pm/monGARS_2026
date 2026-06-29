@@ -386,8 +386,21 @@ struct RepoSelfModelService: Sendable {
         guard !terms.isEmpty else { return [] }
         guard let scope = try activeScope(repositoryName: repositoryName, commitHash: commitHash, context: context) else { return [] }
 
-        let records = try symbolsDescriptor(repositoryName: scope.repositoryName, commitHash: scope.commitHash).fetch(from: context)
-        return records
+        let candidateNeedles = Array(Set([terms[0], terms[0].capitalized, terms[0].uppercased()])).filter { !$0.isEmpty }
+        var records: [RepoSymbolRecord] = []
+        for needle in candidateNeedles {
+            records = try candidateSymbols(
+                repositoryName: scope.repositoryName,
+                commitHash: scope.commitHash,
+                primaryTerm: needle,
+                context: context
+            )
+            if !records.isEmpty { break }
+        }
+        let scoredRecords = records.isEmpty
+            ? try symbolsDescriptor(repositoryName: scope.repositoryName, commitHash: scope.commitHash).fetch(from: context)
+            : records
+        return scoredRecords
             .map { record in (record, score(record: record, terms: terms)) }
             .filter { $0.1 > 0 }
             .sorted { lhs, rhs in
@@ -450,6 +463,55 @@ struct RepoSelfModelService: Sendable {
         }
         return FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
             record.repositoryName == repositoryName
+        })
+    }
+
+    private func candidateSymbols(repositoryName: String, commitHash: String, primaryTerm: String, context: ModelContext) throws -> [RepoSymbolRecord] {
+        var unique: [UUID: RepoSymbolRecord] = [:]
+        for record in try candidateSymbolsByNameDescriptor(repositoryName: repositoryName, commitHash: commitHash, primaryTerm: primaryTerm).fetch(from: context) {
+            unique[record.id] = record
+        }
+        for record in try candidateSymbolsByPathDescriptor(repositoryName: repositoryName, commitHash: commitHash, primaryTerm: primaryTerm).fetch(from: context) {
+            unique[record.id] = record
+        }
+        for record in try candidateSymbolsByModuleDescriptor(repositoryName: repositoryName, commitHash: commitHash, primaryTerm: primaryTerm).fetch(from: context) {
+            unique[record.id] = record
+        }
+        for record in try candidateSymbolsByParentDescriptor(repositoryName: repositoryName, commitHash: commitHash, primaryTerm: primaryTerm).fetch(from: context) {
+            unique[record.id] = record
+        }
+        return Array(unique.values)
+    }
+
+    private func candidateSymbolsByNameDescriptor(repositoryName: String, commitHash: String, primaryTerm: String) -> FetchDescriptor<RepoSymbolRecord> {
+        FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+            record.repositoryName == repositoryName
+                && record.commitHash == commitHash
+                && record.name.contains(primaryTerm)
+        })
+    }
+
+    private func candidateSymbolsByPathDescriptor(repositoryName: String, commitHash: String, primaryTerm: String) -> FetchDescriptor<RepoSymbolRecord> {
+        FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+            record.repositoryName == repositoryName
+                && record.commitHash == commitHash
+                && record.path.contains(primaryTerm)
+        })
+    }
+
+    private func candidateSymbolsByModuleDescriptor(repositoryName: String, commitHash: String, primaryTerm: String) -> FetchDescriptor<RepoSymbolRecord> {
+        FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+            record.repositoryName == repositoryName
+                && record.commitHash == commitHash
+                && record.moduleName.contains(primaryTerm)
+        })
+    }
+
+    private func candidateSymbolsByParentDescriptor(repositoryName: String, commitHash: String, primaryTerm: String) -> FetchDescriptor<RepoSymbolRecord> {
+        FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+            record.repositoryName == repositoryName
+                && record.commitHash == commitHash
+                && (record.parentName?.contains(primaryTerm) ?? false)
         })
     }
 

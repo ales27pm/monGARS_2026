@@ -1001,12 +1001,12 @@ struct MonGARSTests {
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
-            if case .approvalRequired(let runID, let approvalID, let toolName, _) = event {
-                approvalToolName = toolName
-                approvalRunID = runID
+            if case .approvalRequired(let approval) = event {
+                approvalToolName = approval.toolName
+                approvalRunID = approval.runID
                 let memoriesBeforeApproval = try context.fetch(FetchDescriptor<MemoryRecord>())
                 #expect(memoriesBeforeApproval.count == 1)
-                try container.agentRuntime.approve(approvalID: approvalID, context: context)
+                try container.agentRuntime.approve(approvalID: approval.approvalID, context: context)
             }
             if case .completed(_, let response) = event {
                 completedResponse = response
@@ -1042,8 +1042,8 @@ struct MonGARSTests {
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
-            if case .approvalRequired(_, let approvalID, _, _) = event {
-                try container.agentRuntime.reject(approvalID: approvalID, context: context)
+            if case .approvalRequired(let approval) = event {
+                try container.agentRuntime.reject(approvalID: approval.approvalID, context: context)
             }
             if case .completed(_, let response) = event {
                 completedResponse = response
@@ -1119,8 +1119,8 @@ struct MonGARSTests {
 
         var completedResponse = ""
         for try await event in container.agentRuntime.resume(run: run, provider: ScriptedLLMProvider(), context: context) {
-            if case .approvalRequired(_, let approvalID, _, _) = event {
-                try container.agentRuntime.approve(approvalID: approvalID, context: context)
+            if case .approvalRequired(let approval) = event {
+                try container.agentRuntime.approve(approvalID: approval.approvalID, context: context)
             }
             if case .completed(_, let response) = event {
                 completedResponse = response
@@ -1273,8 +1273,8 @@ struct MonGARSTests {
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
-            if case .approvalRequired(_, let approvalID, _, _) = event {
-                try container.agentRuntime.reject(approvalID: approvalID, context: context)
+            if case .approvalRequired(let approval) = event {
+                try container.agentRuntime.reject(approvalID: approval.approvalID, context: context)
             }
         }
 
@@ -1426,25 +1426,43 @@ struct MonGARSTests {
         let (_, context) = makeContext()
         let buffer = AgentTelemetryBuffer()
         let runID = UUID()
+        let rawInput = "post https://example.com Authorization: Bearer secret-token body private payload"
+        let rawTarget = "https://example.com/path?api_key=secret-token"
         buffer.appendToolCall(
             runID: runID,
-            input: "post https://example.com Authorization: Bearer secret-token body private payload",
+            input: rawInput,
             result: ToolResult(
                 toolName: "remote_network",
                 output: "Prepared approved email handoff: mailto:sam@example.com?body=secret body",
                 riskLevel: .high,
                 requiresApproval: true,
                 approved: true,
-                target: "https://example.com/path?api_key=secret-token"
+                target: rawTarget
             )
         )
         try buffer.flush(runID: runID, to: context)
 
         let record = try #require(try context.fetch(FetchDescriptor<ToolCallRecord>()).first)
+        let expectedRawHash = ApprovalTupleHasher.payloadHash(
+            toolName: "remote_network",
+            target: rawTarget,
+            normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: "remote_network", input: rawInput, target: rawTarget),
+            riskLevel: ToolRiskLevel.high.rawValue,
+            sessionID: runID
+        )
+        let redactedDisplayHash = ApprovalTupleHasher.payloadHash(
+            toolName: "remote_network",
+            target: record.target,
+            normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: "remote_network", input: record.input, target: record.target),
+            riskLevel: ToolRiskLevel.high.rawValue,
+            sessionID: runID
+        )
         #expect(!record.input.contains("secret-token"))
         #expect(!record.output.contains("secret body"))
         #expect(record.output.contains("[REDACTED]"))
         #expect(record.target?.contains("secret-token") == false)
+        #expect(record.payloadHash == expectedRawHash)
+        #expect(record.payloadHash != redactedDisplayHash)
     }
 
     @Test func approvalGateCancelRunReleasesSuspendedApproval() async throws {

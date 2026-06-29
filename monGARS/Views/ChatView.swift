@@ -279,13 +279,13 @@ struct ChatView: View {
                         currentRunID = runID
                         assistant.agentRunID = runID
                         assistant.content = partial
-                    case .approvalRequired(let runID, let approvalID, let toolName, let reason):
-                        currentRunID = runID
-                        assistant.agentRunID = runID
+                    case .approvalRequired(let approval):
+                        currentRunID = approval.runID
+                        assistant.agentRunID = approval.runID
                         assistant.statusText = "Approval required"
-                        assistant.content = "I need approval before running \(toolName): \(reason)"
-                        pendingApprovals[assistant.id] = PendingApproval(id: approvalID, runID: runID, toolName: toolName, reason: reason)
-                        statusMessage = "Approval required for \(toolName)."
+                        assistant.content = "I need approval before running \(approval.toolName): \(approval.reason)"
+                        pendingApprovals[assistant.id] = PendingApproval(approval: approval)
+                        statusMessage = "Approval required for \(approval.toolName)."
                     case .completed(let runID, let response):
                         currentRunID = runID
                         assistant.agentRunID = runID
@@ -421,10 +421,12 @@ struct ChatView: View {
 }
 
 struct PendingApproval: Identifiable, Equatable {
-    let id: UUID
-    let runID: UUID
-    let toolName: String
-    let reason: String
+    var id: UUID { approval.approvalID }
+    let approval: ApprovalPresentation
+
+    var runID: UUID { approval.runID }
+    var toolName: String { approval.toolName }
+    var reason: String { approval.reason }
 }
 
 struct MessageBubble: View {
@@ -487,20 +489,12 @@ struct MessageBubble: View {
     }
 
     private func approvalControls(_ approval: PendingApproval) -> some View {
-        HStack(spacing: 8) {
-            Button {
+        ApprovalMetadataCard(approval: approval.approval) { approved in
+            if approved {
                 onApprove(approval)
-            } label: {
-                Label("Approve", systemImage: "checkmark.circle")
-            }
-            .buttonStyle(.borderedProminent)
-
-            Button(role: .destructive) {
+            } else {
                 onReject(approval)
-            } label: {
-                Label("Reject", systemImage: "xmark.circle")
             }
-            .buttonStyle(.bordered)
         }
     }
 

@@ -172,11 +172,34 @@ struct AgentLoopState: Sendable, Codable, Equatable {
     }
 }
 
+struct ApprovalPresentation: Sendable, Equatable, Identifiable {
+    var id: UUID { approvalID }
+    var approvalID: UUID
+    var runID: UUID
+    var toolName: String
+    var target: String?
+    var riskLevel: ToolRiskLevel
+    var payloadHash: String
+    var sessionID: UUID
+    var expiresAt: Date
+    var reason: String
+    var userVisibleDiff: String
+
+    var payloadHashPreview: String {
+        guard !payloadHash.isEmpty else { return "missing" }
+        return String(payloadHash.prefix(12))
+    }
+
+    var sessionPreview: String {
+        String(sessionID.uuidString.prefix(8))
+    }
+}
+
 enum AgentRuntimeEvent: Sendable {
     case status(runID: UUID, phase: AgentPhase, message: String)
     case trace(runID: UUID, phase: AgentPhase, message: String)
     case partialResponse(runID: UUID, text: String)
-    case approvalRequired(runID: UUID, approvalID: UUID, toolName: String, reason: String)
+    case approvalRequired(ApprovalPresentation)
     case completed(runID: UUID, response: String)
 }
 
