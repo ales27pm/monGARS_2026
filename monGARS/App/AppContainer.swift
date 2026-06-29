@@ -9,6 +9,7 @@ final class AppContainer {
     let settingsStore: SettingsStore
     let memoryService: MemoryService
     let documentService: DocumentService
+    let repoSelfModelService: RepoSelfModelService
     let toolRegistry: ToolRegistry
     let toolRouter: ToolRouter
     let agentGraph: AgentGraph
@@ -28,6 +29,7 @@ final class AppContainer {
         settingsStore = SettingsStore()
         memoryService = MemoryService()
         documentService = DocumentService()
+        repoSelfModelService = RepoSelfModelService()
         toolRegistry = ToolRegistry.defaultRegistry(memoryService: memoryService, documentService: documentService)
         toolRouter = ToolRouter(registry: toolRegistry)
         speechService = AppleSpeechService()
@@ -42,19 +44,9 @@ final class AppContainer {
         diagnostics.lastError = persistenceRecoveryMessage
     }
 
-    static let schemaModels: [any PersistentModel.Type] = [
-        Conversation.self,
-        ChatMessage.self,
-        MemoryRecord.self,
-        DocumentRecord.self,
-        DocumentChunkRecord.self,
-        AgentCheckpointRecord.self,
-        AgentRunRecord.self,
-        AgentTraceRecord.self,
-        ToolCallRecord.self,
-        ApprovalRequestRecord.self,
-        AgentTaskRecord.self
-    ]
+    static var schemaModels: [any PersistentModel.Type] {
+        MonGARSSchemaV2.models
+    }
 
     func llmProvider() -> any LLMProvider {
         switch settingsStore.providerMode {
@@ -112,7 +104,7 @@ final class AppContainer {
     private static func makeModelContainer(schema: Schema, inMemory: Bool) -> (container: ModelContainer, storageState: StorageState, recoveryMessage: String?) {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: inMemory)
         do {
-            return (try ModelContainer(for: schema, configurations: [configuration]), inMemory ? .testMemory : .durable, nil)
+            return (try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [configuration]), inMemory ? .testMemory : .durable, nil)
         } catch {
             guard !inMemory else {
                 return makeVolatileRecoveryContainer(schema: schema, originalError: error)
@@ -120,7 +112,7 @@ final class AppContainer {
 
             let recovery = quarantineDefaultStoreFiles()
             do {
-                let container = try ModelContainer(for: schema, configurations: [configuration])
+                let container = try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [configuration])
                 let message = "Recovered local storage after SwiftData startup error: \(error.localizedDescription). \(recovery)"
                 return (container, .recoveredDurable, message)
             } catch {
@@ -131,7 +123,7 @@ final class AppContainer {
 
     private static func makeVolatileRecoveryContainer(schema: Schema, originalError: Error) -> (container: ModelContainer, storageState: StorageState, recoveryMessage: String?) {
         do {
-            let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+            let container = try ModelContainer(for: schema, migrationPlan: MonGARSMigrationPlan.self, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
             let message = "Persistent storage is unavailable. User workflows are disabled until the store can be repaired or the app is reinstalled: \(originalError.localizedDescription)"
             return (container, .unavailableEphemeral(message), message)
         } catch {

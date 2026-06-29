@@ -231,6 +231,7 @@ final class AgentTraceRecord {
 final class ToolCallRecord {
     var id: UUID
     var runID: UUID
+    var sessionID: UUID = UUID()
     var toolName: String
     var input: String
     var output: String
@@ -239,6 +240,7 @@ final class ToolCallRecord {
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
+    var payloadHash: String = ""
     var statusCode: Int?
     var latencyMs: Double
     var errorCategory: String?
@@ -247,6 +249,7 @@ final class ToolCallRecord {
     init(
         id: UUID = UUID(),
         runID: UUID,
+        sessionID: UUID? = nil,
         toolName: String,
         input: String,
         output: String,
@@ -255,21 +258,34 @@ final class ToolCallRecord {
         requiresApproval: Bool,
         approved: Bool,
         target: String? = nil,
+        payloadHash: String = "",
         statusCode: Int? = nil,
         latencyMs: Double = 0,
         errorCategory: String? = nil,
         createdAt: Date = .now
     ) {
+        let resolvedSessionID = sessionID ?? runID
+        let normalizedRisk = ApprovalPolicy.normalizedRisk(riskLevel)
         self.id = id
         self.runID = runID
+        self.sessionID = resolvedSessionID
         self.toolName = toolName
         self.input = input
         self.output = output
-        self.riskLevel = riskLevel
+        self.riskLevel = normalizedRisk.rawValue
         self.outcomeRawValue = outcomeRawValue
         self.requiresApproval = requiresApproval
         self.approved = approved
         self.target = target
+        self.payloadHash = payloadHash.isEmpty
+            ? ApprovalTupleHasher.payloadHash(
+                toolName: toolName,
+                target: target,
+                normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: toolName, input: input, target: target),
+                riskLevel: normalizedRisk.rawValue,
+                sessionID: resolvedSessionID
+            )
+            : payloadHash
         self.statusCode = statusCode
         self.latencyMs = latencyMs
         self.errorCategory = errorCategory
@@ -281,20 +297,82 @@ final class ToolCallRecord {
 final class ApprovalRequestRecord {
     var id: UUID
     var runID: UUID
+    var sessionID: UUID = UUID()
     var actionName: String
+    var toolName: String = ""
+    var target: String?
+    var normalizedArgumentsJSON: String = "{}"
+    var payloadHash: String = ""
+    var riskLevelRawValue: String = ApprovalPolicy.defaultRiskLevel.rawValue
     var reason: String
+    var userVisibleDiff: String = ""
+    var expiresAt: Date = ApprovalPolicy.expirationDate()
     var approved: Bool?
     var createdAt: Date
     var resolvedAt: Date?
 
-    init(id: UUID = UUID(), runID: UUID, actionName: String, reason: String, approved: Bool? = nil, createdAt: Date = .now, resolvedAt: Date? = nil) {
+    init(
+        id: UUID = UUID(),
+        runID: UUID,
+        actionName: String,
+        reason: String,
+        approved: Bool? = nil,
+        createdAt: Date = .now,
+        resolvedAt: Date? = nil,
+        sessionID: UUID? = nil,
+        toolName: String? = nil,
+        target: String? = nil,
+        normalizedArgumentsJSON: String = "{}",
+        payloadHash: String? = nil,
+        riskLevelRawValue: String = ApprovalPolicy.defaultRiskLevel.rawValue,
+        userVisibleDiff: String? = nil,
+        expiresAt: Date? = nil
+    ) {
+        let resolvedSessionID = sessionID ?? runID
+        let resolvedToolName = toolName ?? actionName
+        let normalizedRisk = ApprovalPolicy.normalizedRisk(riskLevelRawValue)
+        let resolvedArguments = ApprovalTupleHasher.normalizedJSON(normalizedArgumentsJSON)
         self.id = id
         self.runID = runID
+        self.sessionID = resolvedSessionID
         self.actionName = actionName
+        self.toolName = resolvedToolName
+        self.target = target
+        self.normalizedArgumentsJSON = resolvedArguments
+        self.riskLevelRawValue = normalizedRisk.rawValue
+        self.payloadHash = payloadHash ?? ApprovalTupleHasher.payloadHash(
+            toolName: resolvedToolName,
+            target: target,
+            normalizedArgumentsJSON: resolvedArguments,
+            riskLevel: normalizedRisk.rawValue,
+            sessionID: resolvedSessionID
+        )
         self.reason = reason
+        self.userVisibleDiff = userVisibleDiff ?? reason
+        self.expiresAt = expiresAt ?? ApprovalPolicy.expirationDate(from: createdAt)
         self.approved = approved
         self.createdAt = createdAt
         self.resolvedAt = resolvedAt
+    }
+
+    var riskLevel: ToolRiskLevel {
+        ApprovalPolicy.normalizedRisk(riskLevelRawValue)
+    }
+
+    func isExpired(at date: Date = .now) -> Bool {
+        date > expiresAt
+    }
+
+    func approvalTuple() -> ApprovalTuple {
+        ApprovalTuple(
+            toolName: toolName,
+            target: target,
+            normalizedArgumentsJSON: normalizedArgumentsJSON,
+            riskLevel: riskLevel,
+            expiresAt: expiresAt,
+            sessionID: sessionID,
+            userVisibleDiff: userVisibleDiff
+        )
     }
 }
 
@@ -319,4 +397,31 @@ final class AgentTaskRecord {
         self.updatedAt = updatedAt
         self.completedAt = completedAt
     }
+}
+
+enum MonGARSSchemaV2: VersionedSchema {
+    static var versionIdentifier: Schema.Version { Schema.Version(2, 0, 0) }
+
+    static var models: [any PersistentModel.Type] {
+        [
+            Conversation.self,
+            ChatMessage.self,
+            MemoryRecord.self,
+            DocumentRecord.self,
+            DocumentChunkRecord.self,
+            AgentCheckpointRecord.self,
+            AgentRunRecord.self,
+            AgentTraceRecord.self,
+            ToolCallRecord.self,
+            ApprovalRequestRecord.self,
+            AgentTaskRecord.self,
+            RepoIndexRecord.self,
+            RepoSymbolRecord.self
+        ]
+    }
+}
+
+enum MonGARSMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] { [MonGARSSchemaV2.self] }
+    static var stages: [MigrationStage] { [] }
 }

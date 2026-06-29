@@ -1,6 +1,6 @@
 import Foundation
 
-enum AutonomyLevel: String, Codable, CaseIterable, Identifiable, Sendable {
+enum AutonomyLevel: String, Codable, CaseIterable, Identifiable, Sendable, Equatable {
     case manual
     case assisted
     case semiAuto
@@ -18,7 +18,7 @@ enum AutonomyLevel: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum AgentRunStatus: String, Codable, Sendable {
+enum AgentRunStatus: String, Codable, Sendable, Equatable {
     case running
     case paused
     case waitingForApproval
@@ -29,7 +29,7 @@ enum AgentRunStatus: String, Codable, Sendable {
     case timedOut
 }
 
-enum AgentPhase: String, Codable, CaseIterable, Sendable {
+enum AgentPhase: String, Codable, CaseIterable, Sendable, Equatable {
     case understandIntent
     case retrieveContext
     case plan
@@ -57,7 +57,7 @@ enum AgentPhase: String, Codable, CaseIterable, Sendable {
     }
 }
 
-enum ToolRiskLevel: String, Codable, CaseIterable, Sendable {
+enum ToolRiskLevel: String, Codable, CaseIterable, Sendable, Equatable {
     case low
     case medium
     case high
@@ -68,7 +68,7 @@ enum ToolRiskLevel: String, Codable, CaseIterable, Sendable {
     }
 }
 
-struct ToolSchema: Codable, Sendable {
+struct ToolSchema: Codable, Sendable, Equatable {
     var inputDescription: String
     var examples: [String]
 }
@@ -139,20 +139,20 @@ extension ToolResult {
     }
 }
 
-struct AgentRuntimeOptions: Sendable {
+struct AgentRuntimeOptions: Sendable, Equatable {
     var autonomyLevel: AutonomyLevel = .assisted
     var maxSteps: Int = 12
     var timeoutSeconds: TimeInterval = 45
     var networkToolsEnabled: Bool = false
 }
 
-struct AgentPlan: Sendable, Codable {
+struct AgentPlan: Sendable, Codable, Equatable {
     var summary: String
     var steps: [String]
     var shouldRemember: Bool
 }
 
-struct AgentLoopState: Sendable, Codable {
+struct AgentLoopState: Sendable, Codable, Equatable {
     var runID: UUID
     var goal: String
     var phase: AgentPhase = .understandIntent
@@ -180,13 +180,14 @@ enum AgentRuntimeEvent: Sendable {
     case completed(runID: UUID, response: String)
 }
 
-enum AgentRuntimeError: LocalizedError {
+enum AgentRuntimeError: LocalizedError, Equatable {
     case cancelled
     case paused
     case timedOut
     case maxStepsReached
     case approvalRequired(String)
     case approvalRejected(String)
+    case approvalExpired(String)
     case approvalNotFound
     case resumeCheckpointUnavailable
 
@@ -198,6 +199,7 @@ enum AgentRuntimeError: LocalizedError {
         case .maxStepsReached: "The agent reached its maximum step limit."
         case .approvalRequired(let action): "Approval is required before running \(action)."
         case .approvalRejected(let action): "Approval was rejected for \(action)."
+        case .approvalExpired(let action): "Approval expired before running \(action). Restart the run to approve a fresh request."
         case .approvalNotFound: "The approval request could not be found."
         case .resumeCheckpointUnavailable: "No durable checkpoint was available for this run."
         }

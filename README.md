@@ -1,6 +1,6 @@
 # monGARS
 
-monGARS is a native SwiftUI iOS app for a privacy-first autonomous assistant. It uses local SwiftData storage, an `LLMProvider` abstraction, a LangGraph-style workflow layer, a working autonomous agent loop, LangChain-style tools, local memories, document import, speech-ready service boundaries, approval gates, goals/tasks, and diagnostics.
+monGARS is a native SwiftUI iOS app for a privacy-first autonomous assistant. It uses local SwiftData storage, an `LLMProvider` abstraction, a LangGraph-style workflow layer, a working autonomous agent loop, LangChain-style tools, local memories, document import, speech-ready service boundaries, approval gates, goals/tasks, diagnostics, a scored tool-routing control plane, immutable approval tuples, and a repo self-model symbol graph.
 
 ## Requirements
 
@@ -60,9 +60,10 @@ Current verification on this machine:
 - `monGARS/Persistence`: persistence helpers and local error types.
 - `monGARS/LLM`: provider protocol and Foundation/remote providers.
 - `monGARS/Networking`: centralized URLSession client, retry/timeout policy, status/content-type validation, line streaming, and network configuration helpers.
-- `monGARS/Security`: Keychain-backed secret storage.
+- `monGARS/Security`: Keychain-backed secret storage plus immutable approval tuple hashing.
+- `monGARS/SelfModel`: repo-aware symbol graph indexing and SwiftData persistence for the operational self-model.
 - `monGARS/AgentGraph`: graph state, autonomous runtime, planner, executor, observer, reflector, context builder, checkpoints, resume support.
-- `monGARS/Tools`: schema/risk-aware tool protocol, registry, router, local tools, native Apple permission tools, web/weather fetch, handoff tools, and approved generic HTTP.
+- `monGARS/Tools`: schema/risk-aware tool protocol, registry, scored router with abstention, local tools, native Apple permission tools, web/weather fetch, handoff tools, and approved generic HTTP.
 - `monGARS/Memory`: scored, deduplicated, searchable, editable, exportable local memory service.
 - `monGARS/Documents`: document import, PDFKit text extraction, chunking, and keyword retrieval.
 - `monGARS/Speech`: speech service abstraction and Apple Speech permission implementation.
@@ -74,6 +75,14 @@ Current verification on this machine:
 The default provider mode is Foundation Models with no alternate local provider. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. Localhost, `.local`, and private LAN hosts are blocked by the central `NetworkClient` unless Developer Mode is enabled in Settings. API keys are stored in Keychain, not UserDefaults.
 
 If SwiftData cannot open durable storage after store quarantine/retry, monGARS renders a storage-unavailable screen and disables user workflows. It does not continue Chat, memory, document, goal, or tool actions against non-durable user data.
+
+## Agentic Control Plane
+
+The control plane now exposes three production-shaped primitives:
+
+- `ToolRouter.routeDecision(input:)` returns a scored `ToolRouteDecision` with `tool`, `toolName`, confidence, risk level, approval requirement, anchored evidence, ambiguity detection, and confidence-based abstention. Target/action details are read from the selected tool’s metadata and folded into the anchored justification when available.
+- `ApprovalTuple` and the expanded `ApprovalRequestRecord` persist `tool_name`, `target`, `normalized_arguments`, `payload_hash`, `risk_level`, `expires_at`, `session_id`, and `user_visible_diff`. Goals renders these tuple fields and blocks expired approvals from the UI.
+- `RepoSelfModelService` builds and persists a hierarchical repo symbol graph with module/type/function/property nodes, commit hashes, file paths, line ranges, signatures, parent symbols, and privacy levels. The parser is deterministic and keeps a SwiftSyntax/SourceKit-ready seam for a future richer backend without changing the SwiftData records.
 
 ## Developer Real Tool E2E
 
