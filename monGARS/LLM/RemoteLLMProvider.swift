@@ -74,9 +74,7 @@ struct RemoteLLMProvider: LLMProvider {
     }
 
     private func payload(for request: LLMRequest, stream: Bool, endpoint: URL) -> LLMRequestPayload {
-        let prompt = ([request.retrievedContext.joined(separator: "\n"), request.conversationContext.joined(separator: "\n"), request.prompt]
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-            .joined(separator: "\n\n")
+        let prompt = LLMPromptAssembler.assemble(request: request)
         let path = endpoint.path.lowercased()
         if path.contains("/chat/completions") {
             return .openAI(OpenAIChatRequest(

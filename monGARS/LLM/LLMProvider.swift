@@ -1,14 +1,101 @@
 import Foundation
 
 struct LLMRequest: Sendable {
-    var prompt: String
+    private(set) var prompt: String
     var conversationContext: [String]
     var retrievedContext: [String]
+    var segments: [LLMPromptSegment]
+    var isPromptPreassembled: Bool
+
+    init(prompt: String, conversationContext: [String], retrievedContext: [String], segments: [LLMPromptSegment]? = nil, isPromptPreassembled: Bool = false) {
+        self.conversationContext = conversationContext
+        self.retrievedContext = retrievedContext
+        self.segments = segments ?? LLMPromptAssembler.segments(
+            trustedPrompt: prompt,
+            conversationContext: conversationContext,
+            retrievedContext: retrievedContext
+        )
+        self.isPromptPreassembled = isPromptPreassembled
+        self.prompt = isPromptPreassembled ? prompt : LLMPromptAssembler.assemble(segments: self.segments)
+    }
 }
 
 struct LLMResponse: Sendable {
     var text: String
     var providerName: String
+}
+
+enum LLMPromptTrustLevel: Sendable, Equatable {
+    case trustedInstruction
+    case untrustedData
+}
+
+struct LLMPromptSegment: Sendable, Equatable {
+    var title: String
+    var body: String
+    var trustLevel: LLMPromptTrustLevel
+}
+
+enum PromptContextMarkup {
+    static func render(_ segment: LLMPromptSegment) -> String {
+        switch segment.trustLevel {
+        case .trustedInstruction:
+            let body = segment.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard body.contains("\n") else {
+                return "\(segment.title): \(body)".trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return "\(segment.title):\n\(body)".trimmingCharacters(in: .whitespacesAndNewlines)
+        case .untrustedData:
+            return untrustedBlock(title: segment.title, body: segment.body)
+        }
+    }
+
+    static func untrustedBlock(title: String, items: [String]) -> String {
+        untrustedBlock(title: title, body: items.map(quoteUntrusted).filter { !$0.isEmpty }.joined(separator: "\n\n"))
+    }
+
+    private static func untrustedBlock(title: String, body: String) -> String {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "\(title): none" }
+        return """
+        BEGIN UNTRUSTED \(title)
+        \(body)
+        END UNTRUSTED \(title)
+        """
+    }
+
+    static func quoteUntrusted(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> \($0)" }
+            .joined(separator: "\n")
+    }
+}
+
+enum LLMPromptAssembler {
+    static func assemble(request: LLMRequest) -> String {
+        if request.isPromptPreassembled {
+            return request.prompt
+        }
+        return assemble(segments: request.segments)
+    }
+
+    static func assemble(segments: [LLMPromptSegment]) -> String {
+        segments
+            .map(PromptContextMarkup.render)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    static func segments(trustedPrompt: String, conversationContext: [String], retrievedContext: [String]) -> [LLMPromptSegment] {
+        [
+            retrievedContext.isEmpty ? nil : LLMPromptSegment(title: "REFERENCE CONTEXT", body: retrievedContext.joined(separator: "\n\n"), trustLevel: .untrustedData),
+            conversationContext.isEmpty ? nil : LLMPromptSegment(title: "CONVERSATION CONTEXT", body: conversationContext.joined(separator: "\n\n"), trustLevel: .untrustedData),
+            LLMPromptSegment(title: "APP INSTRUCTIONS", body: trustedPrompt, trustLevel: .trustedInstruction)
+        ]
+            .compactMap { $0 }
+    }
 }
 
 struct LLMProviderCapabilities: Sendable, Codable {

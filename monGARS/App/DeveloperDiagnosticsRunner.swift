@@ -218,8 +218,9 @@ enum DeveloperDiagnosticsRunner {
                 defer { try? FileManager.default.removeItem(at: pdfURL) }
                 try container.documentService.importDocument(url: pdfURL, context: context)
                 if let importedPDF = try container.documentService.documents(context: context).first(where: { $0.title == pdfURL.lastPathComponent }) {
-                    let rankedPDF = try container.documentService.rankedSnippets(matching: pdfProbeText, context: context, limit: 1)
-                    let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(pdfProbeText), context: context)
+                    let pdfSearchQuery = "\(pdfURL.lastPathComponent) \(pdfProbeText)"
+                    let rankedPDF = try container.documentService.rankedSnippets(matching: pdfSearchQuery, context: context, limit: 1)
+                    let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(pdfSearchQuery), context: context)
                     let rawImportMatched = importedPDF.content.contains(pdfProbeText)
                     let indexedChunkMatched = rankedPDF.contains { result in
                         result.documentID == importedPDF.id && result.chunkText.contains(pdfProbeText)
@@ -387,23 +388,22 @@ enum DeveloperDiagnosticsRunner {
         recordError: (String, String, Error) -> Void
     ) async {
         do {
-            let result = try await WeatherTool().execute(request: request("weather in Montreal", true), context: context)
+            let result = try await WeatherTool().execute(request: request("weather", true), context: context)
             record("weather lookup", result) {
                 $0.output.contains("Network tools are disabled")
                     || $0.output.contains("Weather for")
                     || $0.errorCategory == "missing_api_key"
                     || $0.errorCategory == "service_unavailable"
-                    || $0.errorCategory == "geocoding_failed"
+                    || $0.errorCategory == "location_unavailable"
                     || $0.errorCategory == "invalid_configuration"
             }
         } catch { recordError("weather lookup", "weather_lookup", error) }
 
         do {
-            let result = try await MapsTool().execute(request: request("map Apple Park", true), context: context)
+            let result = try await MapsTool().execute(request: request("map 1 Apple Park Way Cupertino CA", true), context: context)
             record("MapKit search", result) {
                 $0.output.contains("Network tools are disabled")
-                    || $0.output.contains("Apple Maps")
-                    || $0.errorCategory == "service_unavailable"
+                    || ($0.outcome == .handoffPrepared && $0.statusCode == 200 && $0.output.contains("Apple Maps"))
                     || $0.errorCategory == "platform_unavailable"
             }
         } catch { recordError("MapKit search", "maps_lookup", error) }
