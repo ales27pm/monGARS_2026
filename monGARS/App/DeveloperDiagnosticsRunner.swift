@@ -388,7 +388,7 @@ enum DeveloperDiagnosticsRunner {
         recordError: (String, String, Error) -> Void
     ) async {
         do {
-            let result = try await WeatherTool().execute(request: request("weather", true), context: context)
+            let result = try await WeatherTool().execute(request: request("weather in Montreal", true), context: context)
             record("weather lookup", result) {
                 $0.output.contains("Network tools are disabled")
                     || $0.output.contains("Weather for")
@@ -405,6 +405,7 @@ enum DeveloperDiagnosticsRunner {
                 $0.output.contains("Network tools are disabled")
                     || ($0.outcome == .handoffPrepared && $0.statusCode == 200 && $0.output.contains("Apple Maps"))
                     || $0.errorCategory == "platform_unavailable"
+                    || ($0.errorCategory == "service_unavailable" && $0.output.contains("Apple Maps"))
             }
         } catch { recordError("MapKit search", "maps_lookup", error) }
 

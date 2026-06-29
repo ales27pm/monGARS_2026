@@ -750,6 +750,9 @@ enum UserFacingResponseSanitizer {
     }
 
     static func sanitizeModelResponse(_ text: String) throws -> String {
+        guard !containsInternalPromptEcho(text) else {
+            throw LLMProviderError.unavailable(invalidResponseMessage)
+        }
         let cleaned = sanitize(text)
         guard cleaned != invalidResponseMessage else {
             throw LLMProviderError.unavailable(invalidResponseMessage)
@@ -772,15 +775,13 @@ enum UserFacingResponseSanitizer {
     }
 
     private static func containsInternalPromptEcho(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        return lower.contains("current phase:")
-            || lower.contains("graph state:")
-            || lower.contains("final answer contract:")
-            || lower.contains("system rules:")
-            || lower.contains("tool results:")
-            || lower.contains("assistant reflection")
-            || lower.contains("final decision")
-            || lower.contains("output formatting")
+        let patterns = [
+            #"(?im)^\s*(current phase|graph state|final answer contract|system rules|tool results)\s*:"#,
+            #"(?im)^\s*\*\*(assistant reflection|final decision|output formatting)\s*:\*\*"#,
+            #"(?im)^\s*(assistant reflection|final decision|output formatting)\s*:"#,
+            #"(?im)^\s*(begin|end) untrusted\b"#
+        ]
+        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }
 
     private static func extractAssistantResponse(from text: String) -> String {

@@ -687,7 +687,8 @@ struct WeatherTool: Tool {
             "current",
             "now"
         ].sorted(by: { $0.count > $1.count }) {
-            cleaned = cleaned.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive, .diacriticInsensitive])
+            let pattern = #"(?i)(?<![\p{L}\p{N}])"# + NSRegularExpression.escapedPattern(for: phrase) + #"(?![\p{L}\p{N}])"#
+            cleaned = cleaned.replacingOccurrences(of: pattern, with: "", options: [.regularExpression, .diacriticInsensitive])
         }
         return cleaned
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1003,7 +1004,7 @@ struct MapsTool: Tool {
             return .needsInput(toolName: name, output: "Provide a place, address, or directions destination for Maps.", riskLevel: riskLevel, requiresApproval: true)
         }
 
-        if Self.isCurrentLocationMapRequest(request.input) {
+        if Self.isCurrentLocationMapRequest(query) {
             #if canImport(CoreLocation)
             do {
                 let location = try await currentDeviceLocation()
@@ -1092,13 +1093,14 @@ struct MapsTool: Tool {
         #endif
     }
 
-    private static func isCurrentLocationMapRequest(_ input: String) -> Bool {
+    static func isCurrentLocationMapRequest(_ input: String) -> Bool {
         let intent = normalizedIntent(input)
-        return intent.contains("where am i")
-            || intent.contains("where i am")
-            || intent.contains("current location")
-            || intent.contains("my location")
-            || intent.contains("locate me")
+        return intent == "where am i"
+            || intent == "where i am"
+            || intent == "current location"
+            || intent == "my location"
+            || intent == "locate me"
+            || intent == "show me where i am"
     }
 
     private static func appleMapsURL(query: String, coordinate: CLLocationCoordinate2D?) -> URL {
