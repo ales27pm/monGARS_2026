@@ -107,6 +107,7 @@ struct GoalsView: View {
             } else {
                 try container.agentRuntime.reject(approval, context: modelContext)
             }
+            errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -180,7 +181,6 @@ private struct ApprovalCard: View {
             Text(approval.reason)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(3)
 
             HStack {
                 Button {
