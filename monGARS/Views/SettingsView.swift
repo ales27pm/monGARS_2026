@@ -50,6 +50,26 @@ struct SettingsView: View {
                 }
             }
 
+            if container.settingsStore.providerMode == .mlx {
+                Section("MLX Local") {
+                    TextField("Model ID", text: mlxModelID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    LabeledContent("Max Tokens") {
+                        Stepper("\(container.settingsStore.mlxMaxTokens)", value: mlxMaxTokens, in: 64...4096, step: 64)
+                    }
+                    LabeledContent("Temperature") {
+                        Stepper(String(format: "%.1f", container.settingsStore.mlxTemperature), value: mlxTemperature, in: 0.0...2.0, step: 0.1)
+                    }
+                    Button("Test MLX Local Model") {
+                        Task { await testMLXLocalModel() }
+                    }
+                    Text("MLX is local-first once model files are loaded. First load may download the configured Hugging Face model and is blocked unless Network is explicitly enabled.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Network") {
                 Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 LabeledContent("Timeout") {
@@ -63,7 +83,7 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Text("Network is off by default. Remote provider calls, web fetches, weather lookups, Maps search, and in-app web navigation stay disabled unless this toggle is on.")
+                Text("Network is off by default. Remote provider calls, MLX model preparation, web fetches, weather lookups, Maps search, and in-app web navigation stay disabled unless this toggle is on.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -260,6 +280,30 @@ struct SettingsView: View {
         }
     }
 
+    private var mlxModelID: Binding<String> {
+        Binding {
+            container.settingsStore.mlxModelID
+        } set: { value in
+            container.settingsStore.mlxModelID = value
+        }
+    }
+
+    private var mlxMaxTokens: Binding<Int> {
+        Binding {
+            container.settingsStore.mlxMaxTokens
+        } set: { value in
+            container.settingsStore.mlxMaxTokens = value
+        }
+    }
+
+    private var mlxTemperature: Binding<Double> {
+        Binding {
+            container.settingsStore.mlxTemperature
+        } set: { value in
+            container.settingsStore.mlxTemperature = value
+        }
+    }
+
     private var remoteEndpoint: Binding<String> {
         Binding {
             container.settingsStore.remoteEndpoint
@@ -357,6 +401,18 @@ struct SettingsView: View {
             container.diagnostics.providerStatus = await provider.status
         } catch {
             connectionTestStatus = "Remote connection failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func testMLXLocalModel() async {
+        connectionTestStatus = "Testing MLX local model..."
+        do {
+            let provider = container.llmProvider()
+            let response = try await provider.complete(request: LLMRequest(prompt: "Reply with exactly: ok", conversationContext: [], retrievedContext: []))
+            connectionTestStatus = "MLX local model responded: \(response.text.prefix(80))"
+            container.diagnostics.providerStatus = await provider.status
+        } catch {
+            connectionTestStatus = "MLX local model failed: \(error.localizedDescription)"
         }
     }
 

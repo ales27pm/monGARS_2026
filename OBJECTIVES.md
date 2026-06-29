@@ -8,7 +8,7 @@ monGARS is a native SwiftUI iOS assistant prototype with production-shaped bound
 - Use SwiftData for persistence.
 - Use an `LLMProvider` abstraction with:
   - `FoundationModelProvider` for Apple Foundation Models when the current SDK/runtime supports it.
-  - Foundation Models as the only production local LLM provider.
+  - `MLXLocalProvider` for explicit MLX Swift LM on-device inference with real package-backed loading and streaming.
   - `RemoteLLMProvider` for user-configured endpoints, disabled unless the user explicitly enables it.
 - Provide a LangGraph-inspired orchestration layer with `AgentState`, `AgentNode`, `AgentGraph`, conditional edges, checkpoint persistence, resume support, and partial response events.
 - Provide an autonomous loop with `AgentRuntime`, `AgentLoop`, `AgentPlanner`, `AgentExecutor`, `AgentObserver`, and `AgentReflector`.

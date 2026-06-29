@@ -53,6 +53,13 @@ final class AppContainer {
         switch settingsStore.providerMode {
         case .foundation:
             return FoundationModelProvider()
+        case .mlx:
+            return MLXLocalProvider(
+                modelID: settingsStore.mlxModelID,
+                maxTokens: settingsStore.mlxMaxTokens,
+                temperature: settingsStore.mlxTemperature,
+                allowsModelDownload: settingsStore.remoteProviderEnabled
+            )
         case .remote:
             return RemoteLLMProvider(
                 endpoint: settingsStore.remoteEndpoint,

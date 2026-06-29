@@ -355,6 +355,35 @@ struct MonGARSTests {
         #expect(SettingsStore.parseHeaders("X-Empty:") == nil)
     }
 
+    @Test func mlxProviderModeIsRealLocalProviderWithoutNetworkGate() async {
+        #expect(ProviderMode.allCases.contains(.mlx))
+        #expect(ProviderMode.mlx.label == "MLX Local")
+
+        let provider = MLXLocalProvider(modelID: "", maxTokens: 512, temperature: 0.2)
+        #expect(provider.name == "MLX Local")
+        #expect(provider.capabilities.isLocal)
+        #expect(provider.capabilities.supportsStreaming)
+        #expect(!provider.capabilities.supportsTools)
+        #expect(!provider.capabilities.supportsJSONMode)
+
+        let status = await provider.status
+        #expect(status.contains("MLX Swift LM"))
+    }
+
+    @Test func mlxProviderBlocksFirstLoadWhenNetworkIsDisabled() async throws {
+        guard MLXLocalProvider.isLinked else {
+            return
+        }
+
+        let provider = MLXLocalProvider(modelID: "mlx-community/Qwen3-0.6B-4bit", maxTokens: 64, temperature: 0.2, allowsModelDownload: false)
+        do {
+            _ = try await provider.complete(request: LLMRequest(prompt: "Reply ok", conversationContext: [], retrievedContext: []))
+            #expect(Bool(false), "MLX first-load must not run while network access is disabled.")
+        } catch LLMProviderError.unavailable(let reason) {
+            #expect(reason.contains("network access is off"))
+        }
+    }
+
     @Test func compactNavigationSmokeTestBuildsRootSections() {
         let (container, _) = makeContext()
         _ = RootView(container: container)
@@ -973,6 +1002,33 @@ struct MonGARSTests {
         #expect(run.statusRawValue == AgentRunStatus.maxStepsReached.rawValue)
         #expect(run.lastError == AgentRuntimeError.maxStepsReached.localizedDescription)
         #expect(run.completedAt != nil)
+    }
+
+    @Test func runtimeSavesExplicitIntroductionAndAttributesModelFailureToRespond() async throws {
+        let (container, context) = makeContext()
+
+        do {
+            for try await _ in container.agentRuntime.run(
+                goal: "Hi, I’m Alexis. How are you?",
+                conversationID: nil,
+                messages: [],
+                provider: InvalidModelEchoProvider(),
+                options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+                context: context
+            ) {}
+        } catch {
+            #expect(error.localizedDescription.contains("model response"))
+        }
+
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+        let memories = try context.fetch(FetchDescriptor<MemoryRecord>())
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+
+        #expect(run.statusRawValue == AgentRunStatus.failed.rawValue)
+        #expect(run.currentPhase == AgentPhase.respond.rawValue)
+        #expect(run.lastError?.contains("model response") == true)
+        #expect(memories.contains { $0.content == "User name is Alexis" })
+        #expect(traces.contains { $0.phase == AgentPhase.saveMemory.rawValue && $0.message.contains("User name is Alexis") })
     }
 
     @Test func runtimeCancelStopsActiveProviderRun() async throws {
@@ -1824,6 +1880,19 @@ struct SlowLLMProvider: LLMProvider {
     func complete(request: LLMRequest) async throws -> LLMResponse {
         try await Task.sleep(nanoseconds: 5_000_000_000)
         return LLMResponse(text: "slow answer", providerName: name)
+    }
+}
+
+struct InvalidModelEchoProvider: LLMProvider {
+    let name = "Invalid Echo Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+
+    var status: String {
+        get async { "Invalid echo test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        LLMResponse(text: "Current phase: reflect\nGraph state: leaking internals", providerName: name)
     }
 }
 

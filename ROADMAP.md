@@ -33,6 +33,7 @@
 - Added routing coverage for memory-save intents and document-summary intents.
 - Added richer document retrieval with chunk ranking and highlighted matches.
 - Added local NaturalLanguage-backed semantic document embeddings with hybrid lexical/vector retrieval.
+- Added explicit MLX Local provider mode backed by MLX Swift LM packages, with complete/streaming provider support and Settings diagnostics.
 - Added live speech dictation into the Chat composer through `SpeechService`.
 - Added timeline and graph visualizations for the Diagnostics screen.
 - Added privacy-gated tools for native reminders/calendar with honest unavailable states, Contacts lookup, weather, messages, phone, email, maps, integrated webview navigation, web fetch, and app-local file actions.

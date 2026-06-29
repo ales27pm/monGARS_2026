@@ -17,11 +17,52 @@ struct AgentPlanner: Sendable {
         steps.append("Reflect on whether the goal is satisfied")
         steps.append("Respond with a concise answer")
 
+        let hasExplicitDurableFact = DurableFactExtractor.memoryContent(from: goal) != nil
         return AgentPlan(
             summary: "Plan for: \(goal)",
             steps: steps,
-            shouldRemember: lower.contains("remember") || lower.contains("key point") || lower.contains("prefer")
+            shouldRemember: hasExplicitDurableFact || lower.contains("remember") || lower.contains("key point") || lower.contains("prefer")
         )
+    }
+}
+
+enum DurableFactExtractor {
+    static func memoryContent(from input: String) -> String? {
+        if let name = capturedValue(in: input, pattern: #"(?i)\bmy\s+name\s+is\s+([^.!?,\n]+)"#) {
+            return "User name is \(name)"
+        }
+        if let name = capturedValue(in: input, pattern: #"(?i)(?:^|[.!?]\s*|\b(?:hi|hello|hey|bonjour|salut)\b,?\s*)i(?:\s+am|'m|’m)\s+([^.!?,\n]+)"#),
+           looksLikeName(name) {
+            return "User name is \(name)"
+        }
+        return nil
+    }
+
+    private static func capturedValue(in input: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        guard let match = regex.firstMatch(in: input, range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: input) else {
+            return nil
+        }
+        let value = String(input[captureRange])
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        return value.isEmpty ? nil : value
+    }
+
+    private static func looksLikeName(_ value: String) -> Bool {
+        let words = value
+            .split(separator: " ")
+            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard (1...4).contains(words.count) else { return false }
+        let rejected = Set(["fine", "good", "ok", "okay", "sorry", "here", "hungry", "tired", "busy", "working", "looking", "trying"])
+        guard !rejected.contains(words.joined(separator: " ").lowercased()) else { return false }
+        return words.allSatisfy { word in
+            guard let firstScalar = word.unicodeScalars.first else { return false }
+            return CharacterSet.uppercaseLetters.contains(firstScalar)
+        }
     }
 }
 
@@ -503,8 +544,16 @@ struct AgentLoop: Sendable {
             try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) { reflectionMessage }
         }
 
+        let canSaveBeforeResponse = DurableFactExtractor.memoryContent(from: goal) != nil || state.toolResults.last?.isEmpty == false
+        if canSaveBeforeResponse, state.plan?.shouldRemember == true, state.selectedToolName != "memory_save", needsPhase(.saveMemory, state: state) {
+            let memory = durableMemory(from: goal, state: state)
+            try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
+            try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Saved memory: \(memory)" }
+        }
+
         contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .respond, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
+            markPhaseStarted(.respond, state: &state, runRecord: runRecord, context: context)
             if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
             let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
             var accumulated = ""
@@ -557,6 +606,14 @@ struct AgentLoop: Sendable {
         try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: true)
         continuation.yield(.status(runID: state.runID, phase: phase, message: phase.statusText))
         continuation.yield(.trace(runID: state.runID, phase: phase, message: text))
+    }
+
+    private func markPhaseStarted(_ phase: AgentPhase, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext) {
+        state.phase = phase
+        runRecord.currentPhase = phase.rawValue
+        runRecord.updatedAt = .now
+        try? recordCheckpoint(state: state, nodeID: "\(phase.rawValue)-started", context: context, includeStateData: true)
+        try? context.safeSave()
     }
 
     private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext, includeStateData: Bool) throws {
@@ -686,6 +743,7 @@ struct AgentLoop: Sendable {
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {
+        if let explicitMemory = DurableFactExtractor.memoryContent(from: goal) { return explicitMemory }
         if let toolOutput = state.toolResults.last, !toolOutput.isEmpty { return "From goal '\(goal)': \(toolOutput)" }
         return "From goal '\(goal)': \(state.finalResponse)"
     }

@@ -22,6 +22,18 @@ final class SettingsStore {
         didSet { UserDefaults.standard.set(remoteProviderEnabled, forKey: Keys.remoteProviderEnabled) }
     }
 
+    var mlxModelID: String {
+        didSet { UserDefaults.standard.set(mlxModelID, forKey: Keys.mlxModelID) }
+    }
+
+    var mlxMaxTokens: Int {
+        didSet { UserDefaults.standard.set(mlxMaxTokens, forKey: Keys.mlxMaxTokens) }
+    }
+
+    var mlxTemperature: Double {
+        didSet { UserDefaults.standard.set(mlxTemperature, forKey: Keys.mlxTemperature) }
+    }
+
     var networkTimeoutSeconds: Double {
         didSet { UserDefaults.standard.set(networkTimeoutSeconds, forKey: AppNetworkConfiguration.Keys.timeoutSeconds) }
     }
@@ -66,6 +78,10 @@ final class SettingsStore {
         remoteModel = AppNetworkConfiguration.remoteModel
         remoteAPIKey = AppNetworkConfiguration.remoteAPIKey
         remoteProviderEnabled = UserDefaults.standard.bool(forKey: Keys.remoteProviderEnabled)
+        mlxModelID = UserDefaults.standard.string(forKey: Keys.mlxModelID) ?? "mlx-community/Qwen3-0.6B-4bit"
+        mlxMaxTokens = UserDefaults.standard.object(forKey: Keys.mlxMaxTokens) as? Int ?? 512
+        let storedMLXTemperature = UserDefaults.standard.double(forKey: Keys.mlxTemperature)
+        mlxTemperature = storedMLXTemperature > 0 ? storedMLXTemperature : 0.2
         let timeout = UserDefaults.standard.double(forKey: AppNetworkConfiguration.Keys.timeoutSeconds)
         networkTimeoutSeconds = timeout > 0 ? timeout : 20
         networkMaxRetries = UserDefaults.standard.object(forKey: AppNetworkConfiguration.Keys.maxRetries) as? Int ?? 2
@@ -83,6 +99,9 @@ final class SettingsStore {
         remoteEndpoint = "http://localhost:11434/api/generate"
         remoteModel = "llama3.2"
         remoteAPIKey = ""
+        mlxModelID = "mlx-community/Qwen3-0.6B-4bit"
+        mlxMaxTokens = 512
+        mlxTemperature = 0.2
         networkTimeoutSeconds = 20
         networkMaxRetries = 2
         weatherEndpoint = "https://api.openweathermap.org/data/2.5/weather"
@@ -121,12 +140,16 @@ final class SettingsStore {
         static let providerMode = "providerMode"
         static let remoteEndpoint = "remoteEndpoint"
         static let remoteProviderEnabled = "remoteProviderEnabled"
+        static let mlxModelID = "mlxModelID"
+        static let mlxMaxTokens = "mlxMaxTokens"
+        static let mlxTemperature = "mlxTemperature"
         static let autonomyLevel = "autonomyLevel"
     }
 }
 
 enum ProviderMode: String, CaseIterable, Identifiable, Codable {
     case foundation
+    case mlx
     case remote
 
     var id: String { rawValue }
@@ -135,6 +158,8 @@ enum ProviderMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .foundation:
             "Foundation Models"
+        case .mlx:
+            "MLX Local"
         case .remote:
             "Remote Endpoint"
         }
