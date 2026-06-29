@@ -25,10 +25,10 @@
 
 ## Recently Completed
 
-- Added immutable approval tuple storage with target, normalized arguments, payload hash, risk level, expiry, session id, and user-visible diff.
-- Added Goals approval cards that expose approval tuple metadata and block expired approvals from UI approval.
-- Added scored route decisions with calibrated confidence, evidence, risk, approval requirement, ambiguity checks, and abstention.
-- Added repo self-model SwiftData records and a deterministic symbol graph builder with commit/file/line provenance and privacy levels.
+- Immutable approval tuple storage now captures target, normalized arguments, payload hash, risk level, expiry, session id, and user-visible diff.
+- Goals approval cards expose approval tuple metadata and block expired approvals from UI approval.
+- Scored route decisions include calibrated confidence, evidence, risk, approval requirement, ambiguity checks, and abstention.
+- Repo self-model SwiftData records now pair with a deterministic symbol graph builder that preserves commit/file/line provenance and privacy levels.
 - Added continuation-backed inline approval suspension in `AgentRuntime`.
 - Added routing coverage for memory-save intents and document-summary intents.
 - Added richer document retrieval with chunk ranking and highlighted matches.
