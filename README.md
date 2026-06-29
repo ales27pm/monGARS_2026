@@ -78,7 +78,7 @@ The default provider mode is Foundation Models with local fallback. Remote mode 
 
 The control plane now exposes three production-shaped primitives:
 
-- `ToolRouter.routeDecision(input:)` returns a scored `ToolRouteDecision` with confidence, risk level, approval requirement, target/action metadata, anchored evidence, ambiguity detection, and confidence-based abstention.
+- `ToolRouter.routeDecision(input:)` returns a scored `ToolRouteDecision` with `tool`, `toolName`, confidence, risk level, approval requirement, anchored evidence, ambiguity detection, and confidence-based abstention. Target/action details are read from the selected tool’s metadata and folded into the anchored justification when available.
 - `ApprovalTuple` and the expanded `ApprovalRequestRecord` persist `tool_name`, `target`, `normalized_arguments`, `payload_hash`, `risk_level`, `expires_at`, `session_id`, and `user_visible_diff`. Goals renders these tuple fields and blocks expired approvals from the UI.
 - `RepoSelfModelService` builds and persists a hierarchical repo symbol graph with module/type/function/property nodes, commit hashes, file paths, line ranges, signatures, parent symbols, and privacy levels. The parser is deterministic and keeps a SwiftSyntax/SourceKit-ready seam for a future richer backend without changing the SwiftData records.
 
