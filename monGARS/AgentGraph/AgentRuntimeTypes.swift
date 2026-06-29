@@ -88,10 +88,48 @@ struct ToolExecutionRequest: Sendable {
 }
 
 extension ToolResult {
+    static func needsInput(toolName: String, output: String, riskLevel: ToolRiskLevel = .low, requiresApproval: Bool = false) -> ToolResult {
+        ToolResult(
+            toolName: toolName,
+            output: output,
+            outcome: .needsInput,
+            riskLevel: riskLevel,
+            requiresApproval: requiresApproval,
+            approved: true,
+            errorCategory: "invalid_arguments"
+        )
+    }
+
+    static func unavailable(toolName: String, output: String, riskLevel: ToolRiskLevel = .low, requiresApproval: Bool = false, target: String? = nil, errorCategory: String = "platform_unavailable") -> ToolResult {
+        ToolResult(
+            toolName: toolName,
+            output: output,
+            outcome: .unavailable,
+            riskLevel: riskLevel,
+            requiresApproval: requiresApproval,
+            approved: true,
+            target: target,
+            errorCategory: errorCategory
+        )
+    }
+
+    static func handoff(toolName: String, output: String, riskLevel: ToolRiskLevel, target: String? = nil) -> ToolResult {
+        ToolResult(
+            toolName: toolName,
+            output: output,
+            outcome: .handoffPrepared,
+            riskLevel: riskLevel,
+            requiresApproval: true,
+            approved: true,
+            target: target
+        )
+    }
+
     static func networkDisabled(toolName: String, riskLevel: ToolRiskLevel, target: String? = nil) -> ToolResult {
         ToolResult(
             toolName: toolName,
             output: "Network tools are disabled in Settings. Enable network access before running this tool.",
+            outcome: .blocked,
             riskLevel: riskLevel,
             requiresApproval: false,
             approved: true,

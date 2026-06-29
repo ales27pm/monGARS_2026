@@ -84,7 +84,7 @@ struct SettingsView: View {
                 Button("Test Weather") {
                     Task { await testWeather() }
                 }
-                Text("Weather lookup prefers WeatherKit when available, then falls back to this OpenWeather-compatible endpoint. Keys are stored in Keychain.")
+                Text("Weather lookup prefers WeatherKit when available, then uses this OpenWeather-compatible secondary provider. Keys are stored in Keychain.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

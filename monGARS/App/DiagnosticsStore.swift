@@ -1,10 +1,17 @@
 import Foundation
 
+struct LiveToolCallDiagnostic: Identifiable, Equatable {
+    var id = UUID()
+    var toolName: String
+    var input: String
+    var output: String
+}
+
 @Observable
 final class DiagnosticsStore {
-    var providerStatus = "Local mock provider ready"
+    var providerStatus = "Foundation Models provider pending runtime availability"
     var graphSteps: [String] = []
-    var toolCalls: [String] = []
+    var toolCalls: [LiveToolCallDiagnostic] = []
     var checkpoints: [String] = []
     var lastError: String?
 
@@ -13,7 +20,11 @@ final class DiagnosticsStore {
         case .step(let name):
             graphSteps.append(DiagnosticsRedactor.redact(name, maxLength: 240))
         case .toolCall(let tool, let input, let output):
-            toolCalls.append("\(tool): \(DiagnosticsRedactor.redact(input, maxLength: 240)) -> \(DiagnosticsRedactor.redact(output, maxLength: 320))")
+            toolCalls.append(LiveToolCallDiagnostic(
+                toolName: DiagnosticsRedactor.redact(tool, maxLength: 120),
+                input: DiagnosticsRedactor.redact(input, maxLength: 240),
+                output: DiagnosticsRedactor.redact(output, maxLength: 320)
+            ))
         case .checkpoint(let checkpoint):
             checkpoints.append("\(checkpoint.nodeID): \(DiagnosticsRedactor.redact(checkpoint.summary, maxLength: 240))")
         case .partialResponse:

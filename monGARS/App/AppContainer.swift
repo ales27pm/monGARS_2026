@@ -5,6 +5,7 @@ import SwiftData
 @Observable
 final class AppContainer {
     let modelContainer: ModelContainer
+    let storageState: StorageState
     let settingsStore: SettingsStore
     let memoryService: MemoryService
     let documentService: DocumentService
@@ -21,6 +22,7 @@ final class AppContainer {
         let schema = Schema(Self.schemaModels)
         let containerResult = Self.makeModelContainer(schema: schema, inMemory: inMemory)
         modelContainer = containerResult.container
+        storageState = containerResult.storageState
         persistenceRecoveryMessage = containerResult.recoveryMessage
 
         settingsStore = SettingsStore()
@@ -57,9 +59,7 @@ final class AppContainer {
     func llmProvider() -> any LLMProvider {
         switch settingsStore.providerMode {
         case .foundation:
-            return FoundationModelProvider(fallback: MockLLMProvider())
-        case .mock:
-            return MockLLMProvider()
+            return FoundationModelProvider()
         case .remote:
             return RemoteLLMProvider(
                 endpoint: settingsStore.remoteEndpoint,
@@ -79,38 +79,61 @@ final class AppContainer {
         let conversation = Conversation(title: "Welcome")
         conversation.messages.append(ChatMessage(role: .assistant, content: "Hi, I am monGARS. Ask me for the time, a calculation, a saved memory, or a document summary."))
         context.insert(conversation)
-        context.insert(MemoryRecord(content: "monGARS keeps chat, memories, and documents local by default.", tags: ["privacy", "local"]))
-        let sampleDocument = DocumentRecord(title: "Sample Notes.md", content: "monGARS is a local-first SwiftUI assistant with tool routing, memory search, and document retrieval.")
-        context.insert(sampleDocument)
-        try? documentService.rebuildChunks(for: sampleDocument, context: context)
-        context.insert(AgentTaskRecord(title: "Try the autonomous document summary flow", notes: "Import a Markdown file, then ask monGARS to summarize it and remember key points."))
         try? context.save()
     }
 
-    private static func makeModelContainer(schema: Schema, inMemory: Bool) -> (container: ModelContainer, recoveryMessage: String?) {
+    enum StorageState: Equatable {
+        case durable
+        case testMemory
+        case recoveredDurable
+        case unavailableEphemeral(String)
+
+        var allowsUserWorkflows: Bool {
+            switch self {
+            case .durable, .testMemory, .recoveredDurable:
+                true
+            case .unavailableEphemeral:
+                false
+            }
+        }
+
+        var message: String? {
+            switch self {
+            case .durable, .testMemory:
+                nil
+            case .recoveredDurable:
+                "Persistent storage was recovered after a startup error."
+            case .unavailableEphemeral(let reason):
+                reason
+            }
+        }
+    }
+
+    private static func makeModelContainer(schema: Schema, inMemory: Bool) -> (container: ModelContainer, storageState: StorageState, recoveryMessage: String?) {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: inMemory)
         do {
-            return (try ModelContainer(for: schema, configurations: [configuration]), nil)
+            return (try ModelContainer(for: schema, configurations: [configuration]), inMemory ? .testMemory : .durable, nil)
         } catch {
             guard !inMemory else {
-                return makeInMemoryFallback(schema: schema, originalError: error)
+                return makeVolatileRecoveryContainer(schema: schema, originalError: error)
             }
 
             let recovery = quarantineDefaultStoreFiles()
             do {
                 let container = try ModelContainer(for: schema, configurations: [configuration])
                 let message = "Recovered local storage after SwiftData startup error: \(error.localizedDescription). \(recovery)"
-                return (container, message)
+                return (container, .recoveredDurable, message)
             } catch {
-                return makeInMemoryFallback(schema: schema, originalError: error)
+                return makeVolatileRecoveryContainer(schema: schema, originalError: error)
             }
         }
     }
 
-    private static func makeInMemoryFallback(schema: Schema, originalError: Error) -> (container: ModelContainer, recoveryMessage: String?) {
+    private static func makeVolatileRecoveryContainer(schema: Schema, originalError: Error) -> (container: ModelContainer, storageState: StorageState, recoveryMessage: String?) {
         do {
-            let fallback = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
-            return (fallback, "Using temporary in-memory storage because persistent storage could not start: \(originalError.localizedDescription)")
+            let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+            let message = "Persistent storage is unavailable. User workflows are disabled until the store can be repaired or the app is reinstalled: \(originalError.localizedDescription)"
+            return (container, .unavailableEphemeral(message), message)
         } catch {
             preconditionFailure("Unable to create any SwiftData container: \(error)")
         }

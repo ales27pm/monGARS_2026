@@ -5,11 +5,12 @@ Use a real device for permission and handoff checks where possible. Keep Setting
 ## Developer Full Real Tool E2E Report
 
 - Open Settings > Developer and tap `Run Full Real Tool E2E & Export Report`. Expected: report is generated under app-owned `AgentFiles/Reports`, can be shared, and includes app/build metadata, network policy, Keychain, framework availability, permission states, SwiftData counts, recent diagnostics, and direct production-tool E2E probes.
+- Inspect the App section. Expected: `Physical device runtime: true`, `Accepted on-device iteration: true`, and `Report acceptance: accepted`; reports from simulator or desktop builds must show `Report acceptance: rejected` and are not real device evidence.
 - Inspect Real Tool E2E. Expected: `Tool coverage: 24/24 registry tools`, no `Missing registry tool probes`, and no `FAIL` lines.
 - Confirm negative-path probes are present. Expected: approval rejection, network-off blocks, invalid input handling, unsafe web scheme block, private-host block, and diagnostics redaction self-check are all `PASS`.
 - Confirm local extraction/import probes are present. Expected: HTML extraction, plain text/JSON preview, PDFKit extraction, and PDF document import/search are all `PASS`.
 - Inspect the report. Expected: no API keys, tokens, email addresses, phone numbers, SMS/email bodies, or contact dumps appear in clear text.
-- Confirm the report states that no `MockLLMProvider` is used and that in-app E2E is not XCTest execution. Expected: Xcode build/test evidence remains separate.
+- Confirm the report states that no LLM provider is used and that in-app E2E is not XCTest execution. Expected: Xcode build/test evidence remains separate.
 
 ## Privacy Gates
 
@@ -21,7 +22,7 @@ Use a real device for permission and handoff checks where possible. Keep Setting
 
 - SMS with a valid phone number. Expected: Messages handoff is prepared only; no send occurs.
 - Phone with a valid phone number. Expected: `tel://` handoff is prepared only; no call occurs until the system UI confirms.
-- Email with Mail configured. Expected: native compose sheet opens; fallback is `mailto:` when Mail cannot send.
+- Email with Mail configured. Expected: native compose sheet opens; handoff is `mailto:` when Mail cannot send.
 - Calendar event creation after granting access. Expected: EventKit creates a real event.
 - Reminder creation after granting access. Expected: EventKit creates a real reminder.
 - Contacts search after granting access. Expected: limited fields for matching contacts only, no full dump.

@@ -57,15 +57,18 @@ enum DocumentEmbeddingVector {
     }
 }
 
-struct NaturalLanguageEmbeddingProvider: EmbeddingProvider {
-    var providerName: String { "NaturalLanguage" }
+struct NaturalLanguageContextualEmbeddingProvider: EmbeddingProvider {
+    var providerName: String { "NaturalLanguage contextual embeddings" }
 
     var status: EmbeddingProviderStatus {
         #if canImport(NaturalLanguage)
-        if NLEmbedding.sentenceEmbedding(for: .english) != nil {
+        guard let embedding = NLContextualEmbedding(language: .english) else {
+            return .unavailable("NaturalLanguage contextual embedding model is unavailable for English.")
+        }
+        if embedding.hasAvailableAssets {
             return .available
         }
-        return .unavailable("NaturalLanguage sentence embeddings are unavailable.")
+        return .unavailable("NaturalLanguage contextual embedding assets are not available on this device.")
         #else
         return .unavailable("NaturalLanguage is unavailable on this platform.")
         #endif
@@ -78,17 +81,45 @@ struct NaturalLanguageEmbeddingProvider: EmbeddingProvider {
         }
 
         #if canImport(NaturalLanguage)
-        guard let embedding = NLEmbedding.sentenceEmbedding(for: .english) else {
-            throw PersistenceError.importFailed("NaturalLanguage sentence embeddings are unavailable.")
+        guard let embedding = NLContextualEmbedding(language: .english) else {
+            throw PersistenceError.importFailed("NaturalLanguage contextual embedding model is unavailable for English.")
         }
-        guard let rawVector = embedding.vector(for: normalized) else {
-            throw PersistenceError.importFailed("NaturalLanguage returned no embedding.")
+        guard embedding.hasAvailableAssets else {
+            throw PersistenceError.importFailed("NaturalLanguage contextual embedding assets are not available on this device.")
         }
-        let vector = rawVector.map(Float.init)
-        guard !vector.isEmpty else {
-            throw PersistenceError.importFailed("NaturalLanguage returned an empty embedding.")
+        do {
+            try embedding.load()
+            defer { embedding.unload() }
+            let result = try embedding.embeddingResult(for: normalized, language: .english)
+            var vectorSum: [Double] = []
+            var vectorCount = 0
+            let fullRange = normalized.startIndex..<normalized.endIndex
+            result.enumerateTokenVectors(in: fullRange) { tokenVector, _ in
+                if vectorSum.isEmpty {
+                    vectorSum = Array(repeating: 0, count: tokenVector.count)
+                }
+                guard vectorSum.count == tokenVector.count else {
+                    return true
+                }
+                for index in tokenVector.indices {
+                    vectorSum[index] += tokenVector[index]
+                }
+                vectorCount += 1
+                return true
+            }
+            guard vectorCount > 0, !vectorSum.isEmpty else {
+                throw PersistenceError.importFailed("NaturalLanguage contextual embedding returned no token vectors.")
+            }
+            let averaged = vectorSum.map { Float($0 / Double(vectorCount)) }
+            guard !averaged.isEmpty else {
+                throw PersistenceError.importFailed("NaturalLanguage contextual embedding returned an empty vector.")
+            }
+            return averaged
+        } catch let error as PersistenceError {
+            throw error
+        } catch {
+            throw PersistenceError.importFailed("NaturalLanguage contextual embedding failed: \(error.localizedDescription)")
         }
-        return vector
         #else
         throw PersistenceError.importFailed("NaturalLanguage is unavailable on this platform.")
         #endif
@@ -96,13 +127,9 @@ struct NaturalLanguageEmbeddingProvider: EmbeddingProvider {
 }
 
 struct DefaultEmbeddingProvider: EmbeddingProvider {
-    var coreMLProvider: any EmbeddingProvider = CoreMLEmbeddingProvider()
-    var naturalLanguageProvider: any EmbeddingProvider = NaturalLanguageEmbeddingProvider()
+    var naturalLanguageProvider: any EmbeddingProvider = NaturalLanguageContextualEmbeddingProvider()
 
     var providerName: String {
-        if case .available = coreMLProvider.status {
-            return coreMLProvider.providerName
-        }
         if case .available = naturalLanguageProvider.status {
             return naturalLanguageProvider.providerName
         }
@@ -110,17 +137,8 @@ struct DefaultEmbeddingProvider: EmbeddingProvider {
     }
 
     var status: EmbeddingProviderStatus {
-        if case .available = coreMLProvider.status {
-            return .available
-        }
         if case .available = naturalLanguageProvider.status {
             return .available
-        }
-        let coreMLReason: String
-        if case .unavailable(let reason) = coreMLProvider.status {
-            coreMLReason = reason
-        } else {
-            coreMLReason = "CoreML provider unavailable."
         }
         let naturalReason: String
         if case .unavailable(let reason) = naturalLanguageProvider.status {
@@ -128,7 +146,7 @@ struct DefaultEmbeddingProvider: EmbeddingProvider {
         } else {
             naturalReason = "NaturalLanguage provider unavailable."
         }
-        return .unavailable("\(coreMLReason) \(naturalReason)")
+        return .unavailable(naturalReason)
     }
 
     var diagnosticDescription: String {
@@ -141,15 +159,6 @@ struct DefaultEmbeddingProvider: EmbeddingProvider {
     }
 
     func embedding(for text: String) throws -> [Float] {
-        if case .available = coreMLProvider.status {
-            do {
-                return try coreMLProvider.embedding(for: text)
-            } catch {
-                if case .unavailable = naturalLanguageProvider.status {
-                    throw error
-                }
-            }
-        }
         if case .available = naturalLanguageProvider.status {
             return try naturalLanguageProvider.embedding(for: text)
         }

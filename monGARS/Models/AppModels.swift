@@ -235,6 +235,7 @@ final class ToolCallRecord {
     var input: String
     var output: String
     var riskLevel: String
+    var outcomeRawValue: String = "success"
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
@@ -250,6 +251,7 @@ final class ToolCallRecord {
         input: String,
         output: String,
         riskLevel: String,
+        outcomeRawValue: String,
         requiresApproval: Bool,
         approved: Bool,
         target: String? = nil,
@@ -264,6 +266,7 @@ final class ToolCallRecord {
         self.input = input
         self.output = output
         self.riskLevel = riskLevel
+        self.outcomeRawValue = outcomeRawValue
         self.requiresApproval = requiresApproval
         self.approved = approved
         self.target = target

@@ -2,7 +2,7 @@
 
 ## App Shell
 
-`monGARS/App` owns startup, dependency injection, provider settings, diagnostics, and seed data. `AppContainer` is the root dependency container and is injected into SwiftUI views.
+`monGARS/App` owns startup, dependency injection, provider settings, diagnostics, and first-run welcome setup. `AppContainer` is the root dependency container and is injected into SwiftUI views.
 
 ## Persistence
 
@@ -20,14 +20,16 @@ SwiftData models live in `monGARS/Models`:
 - `ApprovalRequestRecord`
 - `AgentTaskRecord`
 
-The app seeds one welcome conversation, one memory, one document, and one task when the store is empty.
+The app creates one welcome conversation when the store is empty. It does not create memory, document, or task records on behalf of the user.
+
+Startup records whether SwiftData opened durable storage, recovered durable storage after quarantining an invalid store, or could only create an emergency ephemeral container. The emergency state exists only so the app can render an honest failure screen; Chat, memories, documents, goals, and tools are disabled because new user data cannot be stored durably.
 
 ## LLM Providers
 
 `monGARS/LLM` defines `LLMProvider` plus concrete providers.
 
 - `FoundationModelProvider` imports FoundationModels behind `canImport` and uses `LanguageModelSession` only inside iOS 26 availability checks.
-- `MockLLMProvider` is deterministic and local, suitable for demos, tests, and older runtimes.
+- Foundation Models are the only local LLM provider in production; unsupported runtimes fail honestly.
 - `RemoteLLMProvider` posts only when remote mode and the network toggle are explicitly enabled in Settings. It supports OpenAI-compatible chat completions plus Ollama generate/chat payloads, optional bearer auth from Keychain, non-stream completion, and provider streaming through `NetworkClient` line streaming when the endpoint emits SSE or line-delimited JSON.
 
 ## Agent Runtime And Graph
@@ -41,13 +43,13 @@ Runtime phases and graph nodes write SwiftData checkpoints and trace events. Run
 
 ## Tools, Memory, Documents, Speech
 
-Tools live in `monGARS/Tools` and are routed with simple intent heuristics. Tools declare a schema, risk level, approval requirement, and async execution method. Local tools include calculator, date/time, memory search/save/delete, document search/summarize, conversation search, diagnostics, and task create/update/complete. Privacy-gated tools cover native Reminders and Calendar writes, Contacts lookup, weather lookup, SMS/phone/email handoffs, Apple Maps handoff, integrated webview navigation, approved web fetch, approved generic HTTP, and app-local file list/read/write/delete. Handoff tools prepare reviewed actions; they do not send messages, place calls, or write outside the app-owned agent workspace automatically. Email handoffs present `MFMailComposeViewController` from Chat when iOS can send mail and fall back to the system Mail URL otherwise. Maps lookup uses `MKLocalSearch` when available before preparing the Apple Maps URL. Calendar and Reminder tools succeed only through EventKit; denied permissions return honest errors instead of local simulated success. Weather lookup uses a `WeatherService` abstraction that attempts WeatherKit when the SDK/entitlement path is available, then falls back to a user-configured OpenWeather-compatible endpoint with the API key stored in Keychain. Weather lookup, Maps search, integrated webview navigation, web fetch, and generic remote HTTP are blocked unless Settings enables network provider and tools, and approval is still required before execution.
+Tools live in `monGARS/Tools` and are routed with simple intent heuristics. Tools declare a schema, risk level, approval requirement, and async execution method. Local tools include calculator, date/time, memory search/save/delete, document search/summarize, conversation search, diagnostics, and task create/update/complete. Privacy-gated tools cover native Reminders and Calendar writes, Contacts lookup, weather lookup, SMS/phone/email handoffs, Apple Maps handoff, integrated webview navigation, approved web fetch, approved generic HTTP, and app-local file list/read/write/delete. Handoff tools prepare reviewed actions; they do not send messages, place calls, or write outside the app-owned agent workspace automatically. Email handoffs present `MFMailComposeViewController` from Chat when iOS can send mail and otherwise use the system Mail URL handoff. Maps lookup uses `MKLocalSearch` when available before preparing the Apple Maps URL. Calendar and Reminder tools succeed only through EventKit; denied permissions return honest errors instead of local-only success. Weather lookup uses a `WeatherService` abstraction that attempts WeatherKit when the SDK/entitlement path is available, then uses a user-configured OpenWeather-compatible secondary provider with the API key stored in Keychain. Weather lookup, Maps search, integrated webview navigation, web fetch, and generic remote HTTP are blocked unless Settings enables network provider and tools, and approval is still required before execution.
 
 `NetworkClient` centralizes URLSession async/await calls with configurable timeout, bounded retries with backoff, HTTP status validation, content-type validation, response-size limits, line streaming for SSE/JSONL providers, latency metrics, cancellation propagation, and sanitized OSLog entries. It accepts only HTTP/HTTPS URLs and blocks localhost, `.local`, link-local, and private LAN hosts by default; Settings Developer Mode is the explicit local-network escape hatch. No secret values are logged. Persisted tool-call diagnostics store target, status code, latency, and error category fields when available instead of relying only on output text parsing.
 
-`DeveloperDiagnosticsRunner` lives in `monGARS/App` and powers the Settings > Developer report button. It invokes production tool implementations directly without `MockLLMProvider`, using temporary `monGARS E2E` inputs for mutating probes and respecting the Settings network toggle for network-capable tools. It reports registry coverage, approval-rejection coverage for high/destructive tools, network-off gating, private-host policy, invalid input paths, local HTML/text/PDF extraction, PDF import into SwiftData chunks, app/build metadata, configuration shape, Keychain round trip, framework availability, permission states, SwiftData model counts, and recent diagnostics. Reports are redacted before display/export and written under the app-owned `AgentFiles/Reports` directory. The runner is intentionally not an XCTest launcher; build and unit-test proof still comes from Xcode.
+`DeveloperDiagnosticsRunner` lives in `monGARS/App` and powers the Settings > Developer report button. It invokes production tool implementations directly without any LLM provider, using temporary `monGARS E2E` inputs for mutating probes and respecting the Settings network toggle for network-capable tools. It reports registry coverage, approval-rejection coverage for high/destructive tools, network-off gating, private-host policy, invalid input paths, local HTML/text/PDF extraction, PDF import into SwiftData chunks, app/build metadata, configuration shape, Keychain round trip, framework availability, permission states, SwiftData model counts, and recent diagnostics. Reports are redacted before display/export and written under the app-owned `AgentFiles/Reports` directory. Reports produced anywhere except a physical iOS device are explicitly rejected as real on-device evidence. The runner is intentionally not an XCTest launcher; build and unit-test proof still comes from Xcode.
 
-Memory and document services are SwiftData-backed service structs. Memory supports importance scoring, deduplication, source tracking, search, edit, delete, export, and forget-all. Documents are chunked at import time and retrieved with deterministic hybrid lexical + semantic ranking when local Apple NaturalLanguage sentence embeddings are available; the Core ML provider seam remains for a future bundled `DocumentEmbedding` model. UTF-8 text, Markdown, and selectable-text PDFs are imported locally; PDF text extraction uses PDFKit and records page-numbered text.
+Memory and document services are SwiftData-backed service structs. Memory supports importance scoring, deduplication, source tracking, search, edit, delete, export, and forget-all. Documents are chunked at import time and retrieved with hybrid lexical + semantic ranking when Apple NaturalLanguage contextual embedding assets are available on the device. UTF-8 text, Markdown, and selectable-text PDFs are imported locally; PDF text extraction uses PDFKit and records page-numbered text.
 
 Speech is exposed through `SpeechService`; the current implementation requests Apple Speech authorization, streams live dictation into the Chat composer, and reports denied/restricted/unavailable states cleanly.
 

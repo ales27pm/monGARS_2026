@@ -22,14 +22,14 @@ struct MailComposeSheet: View {
                 dismiss()
             }
         } else {
-            unavailableFallback
+            unavailableHandoff
         }
         #else
-        unavailableFallback
+        unavailableHandoff
         #endif
     }
 
-    private var unavailableFallback: some View {
+    private var unavailableHandoff: some View {
         NavigationStack {
             ContentUnavailableView("Mail compose unavailable", systemImage: "envelope.badge", description: Text("Use the system Mail handoff instead."))
                 .toolbar {

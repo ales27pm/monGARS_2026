@@ -29,11 +29,11 @@
 - Added local NaturalLanguage-backed semantic document embeddings with hybrid lexical/vector retrieval.
 - Added live speech dictation into the Chat composer through `SpeechService`.
 - Added timeline and graph visualizations for the Diagnostics screen.
-- Added privacy-gated tools for native reminders/calendar with local fallback, Contacts lookup, weather, messages, phone, email, maps, integrated webview navigation, web fetch, and app-local file actions.
+- Added privacy-gated tools for native reminders/calendar with honest unavailable states, Contacts lookup, weather, messages, phone, email, maps, integrated webview navigation, web fetch, and app-local file actions.
 - Added Settings-gated network access for remote provider calls and network-capable tools.
-- Added WeatherService with WeatherKit-first behavior and an OpenWeather-compatible Keychain-backed fallback.
+- Added WeatherService with WeatherKit-first behavior and an OpenWeather-compatible Keychain-backed secondary provider.
 - Added PDFKit extraction for web fetch and document import.
 - Added default private-LAN/localhost blocking with explicit Developer Mode opt-in.
 - Added structured HTML extraction for title, description, canonical URL, and readable text.
-- Added Settings > Developer one-button real-tool E2E report export with no-mock tool probes, redaction, Keychain/network-policy checks, permission state, SwiftData counts, and recent diagnostics.
+- Added Settings > Developer one-button real-tool E2E report export with production tool probes, redaction, Keychain/network-policy checks, permission state, SwiftData counts, and recent diagnostics.
 - Added memory edit/export/forget-all UI in Memories.

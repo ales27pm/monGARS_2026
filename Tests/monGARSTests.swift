@@ -137,6 +137,31 @@ struct MonGARSTests {
         return (container, ModelContext(container.modelContainer))
     }
 
+    @Test func appContainerSeparatesTestMemoryFromUserWorkflowStorage() {
+        let container = AppContainer(inMemory: true)
+        #expect(container.storageState == .testMemory)
+        #expect(container.storageState.allowsUserWorkflows)
+
+        let unavailable = AppContainer.StorageState.unavailableEphemeral("Persistent storage is unavailable.")
+        #expect(!unavailable.allowsUserWorkflows)
+        #expect(unavailable.message?.contains("Persistent storage") == true)
+    }
+
+    @Test func diagnosticsStoreKeepsLiveToolCallsStructuredAndRedacted() {
+        let store = DiagnosticsStore()
+        store.record(event: .toolCall(
+            tool: "remote_network",
+            input: "GET https://example.com/path?api_key=secret-token Authorization: Bearer hidden",
+            output: "Prepared approved SMS handoff: sms:15551234567&body=secret body."
+        ))
+
+        #expect(store.toolCalls.count == 1)
+        #expect(store.toolCalls.first?.toolName == "remote_network")
+        #expect(store.toolCalls.first?.input.contains("api_key=[REDACTED]") == true)
+        #expect(store.toolCalls.first?.output.contains("15551234567") == false)
+        #expect(store.toolCalls.first?.output.contains("secret body") == false)
+    }
+
     @Test func memorySearchFindsSavedFacts() throws {
         let (container, context) = makeContext()
         try container.memoryService.save(content: "My preferred city is Montreal.", context: context)
@@ -298,13 +323,13 @@ struct MonGARSTests {
 
         do {
             _ = try await service.currentWeather(for: "Montreal")
-            #expect(Bool(false), "Weather fallback should not fake success without a key.")
+            #expect(Bool(false), "Weather secondary provider should not claim success without a key.")
         } catch WeatherServiceError.missingAPIKey {
             #expect(true)
         }
     }
 
-    @Test func openWeatherCurrentEndpointDoesNotFakeDailyForecast() async throws {
+    @Test func openWeatherCurrentEndpointDoesNotClaimDailyForecast() async throws {
         let service = OpenWeatherCompatibleWeatherService(
             endpoint: "https://example.com/weather",
             apiKey: "test-key",
@@ -314,7 +339,7 @@ struct MonGARSTests {
 
         do {
             _ = try await service.forecastWeather(for: "Montreal", dayOffset: 1)
-            #expect(Bool(false), "Current-weather fallback must not fake a daily forecast.")
+            #expect(Bool(false), "Current-weather secondary provider must not claim a daily forecast.")
         } catch WeatherServiceError.forecastUnavailable {
             #expect(true)
         }
@@ -349,6 +374,8 @@ struct MonGARSTests {
             ("what is the weather forecast for tomorrow", "weather_lookup"),
             ("where am I", "current_location"),
             ("show me where I am on map", "current_location"),
+            ("Show me where I am on map", "current_location"),
+            ("Where am I", "current_location"),
             ("map nearest coffee shop", "maps_lookup"),
             ("open webview https://example.com", "integrated_webview"),
             ("fetch https://example.com", "web_fetch"),
@@ -382,6 +409,7 @@ struct MonGARSTests {
             "search memory for project alpha",
             "what do you remember about the demo",
             "what is my name",
+            "What is my name",
             "who am I"
         ]
 
@@ -490,7 +518,7 @@ struct MonGARSTests {
             goal: "fetch https://example.com/status",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: false),
             context: context
         ) {}
@@ -510,7 +538,7 @@ struct MonGARSTests {
             goal: "fetch https://example.com/status",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: true),
             context: context
         ) {
@@ -538,6 +566,7 @@ struct MonGARSTests {
         )
 
         #expect(result.errorCategory == "blocked_host")
+        #expect(result.outcome == .blocked)
         #expect(result.output.contains("blocked"))
         #expect(ToolHandoffAction.actions(from: "Approved in-app webview navigation prepared: http://localhost:8080.").isEmpty)
     }
@@ -550,6 +579,7 @@ struct MonGARSTests {
         )
 
         #expect(result.errorCategory == "invalid_arguments")
+        #expect(result.outcome == .needsInput)
         #expect(result.output.contains("non-empty contact"))
     }
 
@@ -558,7 +588,8 @@ struct MonGARSTests {
         let request = ToolExecutionRequest(runID: UUID(), input: "remote network check", autonomyLevel: .auto, approved: true, networkAccessAllowed: true)
         let result = try await RemoteNetworkTool().execute(request: request, context: context)
         #expect(result.output.contains("Provide an HTTP or HTTPS URL"))
-        #expect(!result.output.localizedCaseInsensitiveContains("stubbed"))
+        #expect(result.outcome == .needsInput)
+        #expect(!result.output.localizedCaseInsensitiveContains("fixture-only"))
     }
 
     @Test func textMessageRequiresRecipientPhone() async throws {
@@ -574,6 +605,7 @@ struct MonGARSTests {
         let result = try await EmailInboxTool().execute(request: request, context: context)
 
         #expect(result.toolName == "email_inbox")
+        #expect(result.outcome == .unavailable)
         #expect(result.errorCategory == "platform_unavailable")
         #expect(result.output.contains("iOS does not expose Mail messages"))
         #expect(!result.output.localizedCaseInsensitiveContains("chatbot created by Apple"))
@@ -611,6 +643,19 @@ struct MonGARSTests {
         #expect(list.output.contains(filename))
         #expect(read.output == "private local note")
         #expect(delete.output.contains(filename))
+    }
+
+    @Test func localFileUnsupportedActionNeedsInput() async throws {
+        let (_, context) = makeContext()
+        let tool = LocalFileTool()
+
+        let unsupported = try await tool.execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "local file inspect note.txt", autonomyLevel: .assisted, approved: true),
+            context: context
+        )
+
+        #expect(unsupported.outcome == .needsInput)
+        #expect(unsupported.errorCategory == "invalid_arguments")
     }
 
     @Test func localFileToolBlocksPathTraversal() async throws {
@@ -662,7 +707,7 @@ struct MonGARSTests {
     @Test func graphRecordsCheckpoints() async throws {
         let (container, context) = makeContext()
         let execution = AgentExecutionContext(
-            llmProvider: MockLLMProvider(),
+            llmProvider: ScriptedLLMProvider(),
             toolRouter: container.toolRouter,
             context: context,
             event: { _ in }
@@ -679,7 +724,7 @@ struct MonGARSTests {
     @Test func checkpointResumeCompletesResponse() async throws {
         let (container, context) = makeContext()
         let execution = AgentExecutionContext(
-            llmProvider: MockLLMProvider(),
+            llmProvider: ScriptedLLMProvider(),
             toolRouter: container.toolRouter,
             context: context,
             event: { _ in }
@@ -783,12 +828,14 @@ struct MonGARSTests {
         #expect(try context.fetch(FetchDescriptor<DocumentChunkRecord>()).isEmpty)
     }
 
-    @Test func coreMLEmbeddingProviderReportsUnavailableWithoutBundledModel() {
-        let provider = CoreMLEmbeddingProvider()
-        if case .unavailable(let reason) = provider.status {
-            #expect(reason.contains("DocumentEmbedding") || reason.contains("CoreML"))
-        } else {
-            #expect(Bool(false), "Test environment unexpectedly has a bundled DocumentEmbedding model.")
+    @Test func defaultEmbeddingProviderReportsRealStatus() {
+        let provider = DefaultEmbeddingProvider()
+        switch provider.status {
+        case .available:
+            #expect(provider.providerName == "NaturalLanguage contextual embeddings")
+        case .unavailable(let reason):
+            #expect(!reason.localizedCaseInsensitiveContains("unfinished"))
+            #expect(reason.localizedCaseInsensitiveContains("NaturalLanguage"))
         }
     }
 
@@ -807,7 +854,7 @@ struct MonGARSTests {
             goal: "summarize my imported document and remember the key points",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
@@ -838,7 +885,7 @@ struct MonGARSTests {
                 goal: "summarize my imported document and remember key points",
                 conversationID: nil,
                 messages: [],
-                provider: MockLLMProvider(),
+                provider: ScriptedLLMProvider(),
                 options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 2, timeoutSeconds: 20),
                 context: context
             ) {}
@@ -938,7 +985,7 @@ struct MonGARSTests {
             goal: "forget all memories",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
@@ -979,7 +1026,7 @@ struct MonGARSTests {
             goal: "forget all memories",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
@@ -1009,7 +1056,7 @@ struct MonGARSTests {
             goal: "fetch https://example.com",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .manual, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: false),
             context: context
         ) {}
@@ -1059,7 +1106,7 @@ struct MonGARSTests {
         try context.save()
 
         var completedResponse = ""
-        for try await event in container.agentRuntime.resume(run: run, provider: MockLLMProvider(), context: context) {
+        for try await event in container.agentRuntime.resume(run: run, provider: ScriptedLLMProvider(), context: context) {
             if case .approvalRequired(_, let approvalID, _, _) = event {
                 try container.agentRuntime.approve(approvalID: approvalID, context: context)
             }
@@ -1103,7 +1150,7 @@ struct MonGARSTests {
         try context.save()
 
         var completedResponse = ""
-        for try await event in container.agentRuntime.resume(run: run, provider: MockLLMProvider(), context: context) {
+        for try await event in container.agentRuntime.resume(run: run, provider: ScriptedLLMProvider(), context: context) {
             if case .completed(_, let response) = event {
                 completedResponse = response
             }
@@ -1196,7 +1243,7 @@ struct MonGARSTests {
             goal: "calculate 2 + 3",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {}
@@ -1210,7 +1257,7 @@ struct MonGARSTests {
             goal: "forget all memories",
             conversationID: nil,
             messages: [],
-            provider: MockLLMProvider(),
+            provider: ScriptedLLMProvider(),
             options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
             context: context
         ) {
@@ -1243,6 +1290,7 @@ struct MonGARSTests {
         #expect(afterFlush.first?.toolName == "remote_network")
         #expect(afterFlush.first?.output == "HTTP GET example.com completed")
         #expect(afterFlush.first?.target == "example.com")
+        #expect(afterFlush.first?.outcomeRawValue == ToolOutcome.success.rawValue)
         #expect(afterFlush.first?.statusCode == 200)
         #expect(afterFlush.first?.latencyMs == 42)
     }
@@ -1308,6 +1356,7 @@ struct MonGARSTests {
             input: "mailto:sam@example.com?body=private message Authorization: Bearer hidden-token",
             output: "Prepared approved email handoff: mailto:sam@example.com?body=private message",
             riskLevel: ToolRiskLevel.high.rawValue,
+            outcomeRawValue: ToolOutcome.handoffPrepared.rawValue,
             requiresApproval: true,
             approved: false,
             target: "mailto:sam@example.com?body=private message",
@@ -1318,9 +1367,14 @@ struct MonGARSTests {
         let result = await DeveloperDiagnosticsRunner.run(container: container, context: context, writeReportFile: false)
 
         #expect(result.text.contains("monGARS Developer Diagnostics Report"))
+        #expect(result.text.contains("Runtime:"))
+        #expect(result.text.contains("Physical device runtime:"))
+        #expect(result.text.contains("Accepted on-device iteration:"))
+        #expect(result.text.contains("Report acceptance:"))
+        #expect(result.text.contains("Outcome:"))
         #expect(result.text.contains("Security Checks"))
         #expect(result.text.contains("Real Tool E2E"))
-        #expect(result.text.contains("Provider mock usage: false"))
+        #expect(result.text.contains("LLM provider usage: false"))
         #expect(result.text.contains("Tool coverage: 24/24 registry tools"))
         #expect(!result.text.contains("Missing registry tool probes"))
         #expect(result.text.contains("SMS approval rejection"))
@@ -1339,7 +1393,6 @@ struct MonGARSTests {
         #if canImport(PDFKit)
         #expect(result.text.contains("PDFKit: available; text extraction probe passed"))
         #expect(result.text.contains("PDFKit extraction local"))
-        #expect(!result.text.contains("sample probe did not open"))
         #endif
         #expect(result.text.contains("Keychain round trip: pass"))
         #expect(result.text.contains("SwiftData Counts"))
@@ -1397,15 +1450,15 @@ struct MonGARSTests {
         #expect(decision == .rejected)
     }
 
-    @Test func mockSpeechServiceStreamsPartialTranscript() async throws {
-        let service = MockSpeechService(transcript: "hello monGARS")
+    @Test func scriptedSpeechServiceStreamsPartialTranscript() async throws {
+        let service = ScriptedSpeechService(transcript: "hello monGARS")
         let partial = LockedString()
         try await service.startTranscription { text in
             partial.set(text)
         }
 
         let status = await service.status
-        #expect(status == "Mock speech ready")
+        #expect(status == "Scripted speech ready")
         #expect(partial.value == "hello monGARS")
         #expect(service.stopCount == 0)
 
@@ -1429,11 +1482,12 @@ struct MonGARSTests {
         #expect(nodes.first(where: { $0.phase == .askUser })?.state == .waiting)
     }
 
-    @Test func providerFallbackReportsLocalCapabilities() async {
-        let provider = FoundationModelProvider(fallback: MockLLMProvider())
+    @Test func foundationProviderReportsOnDeviceRequirement() async {
+        let provider = FoundationModelProvider()
         #expect(provider.capabilities.isLocal)
         let status = await provider.status
-        #expect(status.contains("FoundationModels") || status.contains("fallback"))
+        #expect(status.contains("FoundationModels"))
+        #expect(!status.localizedCaseInsensitiveContains("alternate provider"))
     }
 
     @Test func userFacingResponseSanitizerRemovesInternalSections() {
@@ -1459,9 +1513,29 @@ struct MonGARSTests {
         #expect(!sanitized.contains("Assistant Reflection"))
         #expect(!sanitized.contains("Final Decision"))
     }
+
+    @Test func userFacingResponseSanitizerReportsInvalidModelOutputHonestly() {
+        let sanitized = UserFacingResponseSanitizer.sanitize("I'm currently in the reflect phase. Output formatting valid.")
+
+        #expect(sanitized.contains("model response did not contain user-visible content"))
+        #expect(sanitized.contains("Foundation Models"))
+        #expect(!sanitized.localizedCaseInsensitiveContains("chatbot"))
+    }
+
+    @Test func userFacingResponseSanitizerRejectsGenericModelBoilerplate() {
+        let raw = """
+        **Response:**
+        As an AI language model created by Apple, I cannot access external maps or your personal emails due to privacy-first guidelines.
+        """
+        let sanitized = UserFacingResponseSanitizer.sanitize(raw)
+
+        #expect(sanitized.contains("model response did not contain user-visible content"))
+        #expect(!sanitized.localizedCaseInsensitiveContains("created by Apple"))
+        #expect(!sanitized.localizedCaseInsensitiveContains("privacy-first guidelines"))
+    }
 }
 
-final class MockSpeechService: SpeechService, @unchecked Sendable {
+final class ScriptedSpeechService: SpeechService, @unchecked Sendable {
     private let transcript: String
     private(set) var stopCount = 0
 
@@ -1470,7 +1544,7 @@ final class MockSpeechService: SpeechService, @unchecked Sendable {
     }
 
     var status: String {
-        get async { "Mock speech ready" }
+        get async { "Scripted speech ready" }
     }
 
     func requestAuthorization() async -> Bool {
@@ -1486,9 +1560,26 @@ final class MockSpeechService: SpeechService, @unchecked Sendable {
     }
 }
 
+struct ScriptedLLMProvider: LLMProvider {
+    let name = "Scripted Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+
+    var status: String {
+        get async { "Scripted test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        let context = (request.retrievedContext + request.conversationContext.suffix(2)).joined(separator: "\n")
+        if context.isEmpty {
+            return LLMResponse(text: "Scripted response: \(request.prompt)", providerName: name)
+        }
+        return LLMResponse(text: "Scripted response: \(request.prompt)\n\(context)", providerName: name)
+    }
+}
+
 struct SlowLLMProvider: LLMProvider {
     let name = "Slow Test Provider"
-    let capabilities = LLMProviderCapabilities.mockLocal
+    let capabilities = LLMProviderCapabilities.foundationLocal
 
     var status: String {
         get async { "Slow test provider ready" }

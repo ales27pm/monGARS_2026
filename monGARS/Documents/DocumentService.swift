@@ -2,10 +2,6 @@ import Foundation
 import SwiftData
 import UniformTypeIdentifiers
 
-#if canImport(CoreML)
-import CoreML
-#endif
-
 struct DocumentRetrievalResult: Sendable, Equatable {
     var documentID: UUID
     var title: String
@@ -29,37 +25,6 @@ protocol EmbeddingProvider: Sendable {
 
 extension EmbeddingProvider {
     var providerName: String { String(describing: Self.self) }
-}
-
-struct CoreMLEmbeddingProvider: EmbeddingProvider {
-    var providerName: String { "CoreML DocumentEmbedding" }
-
-    var status: EmbeddingProviderStatus {
-        #if canImport(CoreML)
-        guard Self.modelURL() != nil else {
-            return .unavailable("DocumentEmbedding Core ML model is not bundled.")
-        }
-        return .available
-        #else
-        return .unavailable("CoreML is unavailable on this platform.")
-        #endif
-    }
-
-    func embedding(for text: String) throws -> [Float] {
-        #if canImport(CoreML)
-        guard Self.modelURL() != nil else {
-            throw PersistenceError.importFailed("DocumentEmbedding Core ML model is not bundled.")
-        }
-        throw PersistenceError.importFailed("DocumentEmbedding model I/O is not wired yet.")
-        #else
-        throw PersistenceError.importFailed("CoreML is unavailable on this platform.")
-        #endif
-    }
-
-    private static func modelURL() -> URL? {
-        Bundle.main.url(forResource: "DocumentEmbedding", withExtension: "mlmodelc")
-            ?? Bundle.main.url(forResource: "DocumentEmbedding", withExtension: "mlpackage")
-    }
 }
 
 struct DocumentService: Sendable {

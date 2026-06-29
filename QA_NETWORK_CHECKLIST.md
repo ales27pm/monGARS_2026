@@ -17,18 +17,18 @@ Use a real device or simulator with network access. Start with `Enable network p
 ## Web And Weather
 
 - Configure WeatherKit entitlement or an OpenWeather-compatible endpoint and API key. Ask for weather in a real city. Expected: real summary with provider and latency.
-- Remove the weather API key on a build/device without WeatherKit entitlement. Expected: missing-key error, no fake weather.
+- Remove the weather API key on a build/device without WeatherKit entitlement. Expected: missing-key error, no invented weather.
 - Fetch an HTML page. Expected: title, meta description/canonical URL when present, readable text, no script/style noise.
 - Fetch a PDF URL with selectable text. Expected: PDFKit returns page-numbered text preview.
 
 ## Apple Integrations
 
-- Contacts lookup with permission denied. Expected: permission-denied result, no fake contacts.
+- Contacts lookup with permission denied. Expected: permission-denied result, no invented contacts.
 - Calendar and Reminder creation with permission granted. Expected: real EventKit item exists in the system app.
-- Calendar and Reminder creation with permission denied. Expected: honest unavailable/denied result, no local simulated success.
+- Calendar and Reminder creation with permission denied. Expected: honest unavailable/denied result, no local-only success.
 - SMS and phone requests. Expected: approved handoff opens system UI; monGARS does not auto-send or auto-call.
-- Email request. Expected: Chat opens native Mail compose when Mail is configured; otherwise the fallback offers the system Mail URL handoff. monGARS does not auto-send.
-- Maps request with network enabled. Expected: MapKit search runs, then approved Apple Maps handoff opens; no fake location is reported when search fails.
+- Email request. Expected: Chat opens native Mail compose when Mail is configured; otherwise the handoff offers the system Mail URL handoff. monGARS does not auto-send.
+- Maps request with network enabled. Expected: MapKit search runs, then approved Apple Maps handoff opens; no invented location is reported when search fails.
 
 ## Diagnostics
 

@@ -42,7 +42,9 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if horizontalSizeClass == .compact {
+            if !container.storageState.allowsUserWorkflows {
+                StorageUnavailableView(message: container.storageState.message ?? "Persistent storage is unavailable.")
+            } else if horizontalSizeClass == .compact {
                 compactRoot
             } else {
                 regularRoot
@@ -110,5 +112,32 @@ struct RootView: View {
             SettingsView(container: container)
                 .navigationTitle(AppSection.settings.title)
         }
+    }
+}
+
+private struct StorageUnavailableView: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(.red)
+
+            Text("Storage Unavailable")
+                .font(.title.bold())
+
+            Text(message)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+            Text("Chat, memories, documents, goals, and tools are disabled because new data cannot be stored durably.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(maxWidth: 560, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
     }
 }

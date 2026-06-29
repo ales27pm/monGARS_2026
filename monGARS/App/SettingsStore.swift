@@ -127,7 +127,6 @@ final class SettingsStore {
 
 enum ProviderMode: String, CaseIterable, Identifiable, Codable {
     case foundation
-    case mock
     case remote
 
     var id: String { rawValue }
@@ -136,8 +135,6 @@ enum ProviderMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .foundation:
             "Foundation Models"
-        case .mock:
-            "Mock Local"
         case .remote:
             "Remote Endpoint"
         }

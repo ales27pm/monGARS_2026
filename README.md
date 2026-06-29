@@ -6,7 +6,7 @@ monGARS is a native SwiftUI iOS app for a privacy-first autonomous assistant. It
 
 - Xcode 26.x or newer recommended.
 - iOS deployment target: 18.0.
-- Foundation Models are used only when the SDK/runtime exposes the needed API. The deterministic mock provider keeps the app buildable and functional elsewhere.
+- Foundation Models are used only when the SDK/runtime exposes the needed API. Unsupported runtimes return an honest unavailable error instead of a alternate local provider.
 
 ## Run
 
@@ -45,7 +45,7 @@ Current verification on this machine:
 
 ## Demo Flow
 
-1. Open Settings and use `Mock Local` or Foundation Models with mock fallback for local-only behavior.
+1. Open Settings and use Foundation Models on supported on-device runtimes, or configure an approved remote endpoint explicitly.
 2. Keep `Enable network provider and tools` off unless testing remote/web behavior intentionally.
 3. Import a UTF-8 text, Markdown, or selectable-text PDF document from Documents.
 4. In Chat, ask: `summarize my imported document and remember the key points`.
@@ -58,7 +58,7 @@ Current verification on this machine:
 - `monGARS/App`: app entrypoint, dependency container, settings, diagnostics.
 - `monGARS/Models`: SwiftData models.
 - `monGARS/Persistence`: persistence helpers and local error types.
-- `monGARS/LLM`: provider protocol and Foundation/mock/remote providers.
+- `monGARS/LLM`: provider protocol and Foundation/remote providers.
 - `monGARS/Networking`: centralized URLSession client, retry/timeout policy, status/content-type validation, line streaming, and network configuration helpers.
 - `monGARS/Security`: Keychain-backed secret storage.
 - `monGARS/AgentGraph`: graph state, autonomous runtime, planner, executor, observer, reflector, context builder, checkpoints, resume support.
@@ -71,11 +71,13 @@ Current verification on this machine:
 
 ## Privacy Defaults
 
-The default provider mode is Foundation Models with local fallback. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. Localhost, `.local`, and private LAN hosts are blocked by the central `NetworkClient` unless Developer Mode is enabled in Settings. API keys are stored in Keychain, not UserDefaults.
+The default provider mode is Foundation Models with no alternate local provider. Remote mode does not make provider network requests unless the user selects Remote Endpoint and enables the network toggle in Settings. Network-capable tools, including weather lookup, Maps search, web fetch, integrated web navigation, and generic remote HTTP, remain disabled unless the same Settings toggle is enabled, and still require approval before running. Localhost, `.local`, and private LAN hosts are blocked by the central `NetworkClient` unless Developer Mode is enabled in Settings. API keys are stored in Keychain, not UserDefaults.
+
+If SwiftData cannot open durable storage after store quarantine/retry, monGARS renders a storage-unavailable screen and disables user workflows. It does not continue Chat, memory, document, goal, or tool actions against non-durable user data.
 
 ## Developer Real Tool E2E
 
-Settings > Developer includes `Run Full Real Tool E2E & Export Report`. The button invokes production tool implementations directly without `MockLLMProvider`, using temporary `monGARS E2E` inputs where mutation is required. It covers every registered tool, approval rejection gates, network-off blocks, invalid input handling, local memory/documents/conversations/tasks, PDF document import/search, sandboxed files, handoffs, Apple permission-backed tools, network-gated tools, private-host policy, HTML/text/PDF extraction, diagnostics redaction, Keychain round trip, framework availability, SwiftData counts, and recent redacted diagnostics. It writes a text report under the app-owned `AgentFiles/Reports` directory and exposes it through the system share sheet. It does not run XCTest inside the app; use non-launching `xcodebuild build-for-testing` for compiler proof when simulator launch is slow or intentionally skipped.
+Settings > Developer includes `Run Full Real Tool E2E & Export Report`. The button invokes production tool implementations directly without any LLM provider, using temporary `monGARS E2E` inputs where mutation is required. It covers every registered tool, approval rejection gates, network-off blocks, invalid input handling, local memory/documents/conversations/tasks, PDF document import/search, sandboxed files, handoffs, Apple permission-backed tools, network-gated tools, private-host policy, HTML/text/PDF extraction, diagnostics redaction, Keychain round trip, framework availability, SwiftData counts, and recent redacted diagnostics. It writes a text report under the app-owned `AgentFiles/Reports` directory and exposes it through the system share sheet. Reports produced anywhere except a physical iOS device include `Report acceptance: rejected` and a `physical_device_required` failure. It does not run XCTest inside the app; use non-launching `xcodebuild build-for-testing` for compiler proof when simulator launch is slow or intentionally skipped.
 
 ## Autonomous Agent Loop
 
@@ -96,9 +98,9 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 
 - Full XCTest execution currently passes on the `monGARS Test iPhone` simulator when run without rebuilding after `build-for-testing`.
 - Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. Current project build number is `202606280033`.
-- Foundation Models are available only on supported SDK/runtime combinations; older iOS 18 runtimes use the deterministic local fallback.
-- Document retrieval uses local hybrid lexical + NaturalLanguage semantic ranking when Apple sentence embeddings are available. The Core ML `DocumentEmbedding` hook remains optional/future-facing for a bundled custom model.
-- Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a simulated success.
-- WeatherKit requires the Apple WeatherKit entitlement and valid provisioning on device. Without it, weather lookup falls back to the configured OpenWeather-compatible endpoint and Keychain-stored API key.
+- Foundation Models are available only on supported SDK/runtime combinations; unsupported runtimes return an honest unavailable error.
+- Document retrieval uses local hybrid lexical + NaturalLanguage contextual embedding ranking when Apple embedding assets are available on the device.
+- Calendar and Reminder parsing is intentionally conservative. If EventKit access is denied or unavailable, the app returns a real permission/unavailable result instead of recording a local-only success.
+- WeatherKit requires the Apple WeatherKit entitlement and valid provisioning on device. Without it, weather lookup uses the configured OpenWeather-compatible secondary provider and Keychain-stored API key.
 - Web fetch extracts title, meta description, canonical URL, and readable text from HTML; plain text and JSON previews are bounded; PDF downloads use PDFKit text extraction when selectable text is present.
 - Remote provider support covers OpenAI-compatible chat completions and Ollama generate/chat payloads. Other provider-specific schemas may require an adapter.

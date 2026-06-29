@@ -59,7 +59,7 @@ enum WeatherServiceFactory {
     static func makeConfiguredService() -> any WeatherService {
         CompositeWeatherService(
             primary: WeatherKitWeatherService(),
-            fallback: OpenWeatherCompatibleWeatherService(
+            secondaryProvider: OpenWeatherCompatibleWeatherService(
                 endpoint: AppNetworkConfiguration.weatherEndpoint,
                 apiKey: AppNetworkConfiguration.weatherAPIKey,
                 units: AppNetworkConfiguration.weatherUnits,
@@ -71,22 +71,22 @@ enum WeatherServiceFactory {
 
 struct CompositeWeatherService: WeatherService {
     var primary: (any WeatherService)?
-    var fallback: any WeatherService
+    var secondaryProvider: any WeatherService
 
     func currentWeather(for location: String) async throws -> WeatherReport {
         if let primary {
             do {
                 return try await primary.currentWeather(for: location)
             } catch WeatherServiceError.weatherKitUnavailable {
-                return try await fallback.currentWeather(for: location)
+                return try await secondaryProvider.currentWeather(for: location)
             } catch {
                 if AppNetworkConfiguration.weatherAPIKey.isEmpty {
                     throw error
                 }
-                return try await fallback.currentWeather(for: location)
+                return try await secondaryProvider.currentWeather(for: location)
             }
         }
-        return try await fallback.currentWeather(for: location)
+        return try await secondaryProvider.currentWeather(for: location)
     }
 
     func forecastWeather(for location: String, dayOffset: Int) async throws -> WeatherReport {
@@ -94,17 +94,17 @@ struct CompositeWeatherService: WeatherService {
             do {
                 return try await primary.forecastWeather(for: location, dayOffset: dayOffset)
             } catch WeatherServiceError.weatherKitUnavailable {
-                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(for: location, dayOffset: dayOffset)
             } catch WeatherServiceError.forecastUnavailable {
-                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(for: location, dayOffset: dayOffset)
             } catch {
                 if AppNetworkConfiguration.weatherAPIKey.isEmpty {
                     throw error
                 }
-                return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(for: location, dayOffset: dayOffset)
             }
         }
-        return try await fallback.forecastWeather(for: location, dayOffset: dayOffset)
+        return try await secondaryProvider.forecastWeather(for: location, dayOffset: dayOffset)
     }
 
     #if canImport(CoreLocation)
@@ -113,15 +113,15 @@ struct CompositeWeatherService: WeatherService {
             do {
                 return try await primary.currentWeather(at: location, locationName: locationName)
             } catch WeatherServiceError.weatherKitUnavailable {
-                return try await fallback.currentWeather(at: location, locationName: locationName)
+                return try await secondaryProvider.currentWeather(at: location, locationName: locationName)
             } catch {
                 if AppNetworkConfiguration.weatherAPIKey.isEmpty {
                     throw error
                 }
-                return try await fallback.currentWeather(at: location, locationName: locationName)
+                return try await secondaryProvider.currentWeather(at: location, locationName: locationName)
             }
         }
-        return try await fallback.currentWeather(at: location, locationName: locationName)
+        return try await secondaryProvider.currentWeather(at: location, locationName: locationName)
     }
 
     func forecastWeather(at location: CLLocation, locationName: String, dayOffset: Int) async throws -> WeatherReport {
@@ -129,17 +129,17 @@ struct CompositeWeatherService: WeatherService {
             do {
                 return try await primary.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
             } catch WeatherServiceError.weatherKitUnavailable {
-                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
             } catch WeatherServiceError.forecastUnavailable {
-                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
             } catch {
                 if AppNetworkConfiguration.weatherAPIKey.isEmpty {
                     throw error
                 }
-                return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+                return try await secondaryProvider.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
             }
         }
-        return try await fallback.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
+        return try await secondaryProvider.forecastWeather(at: location, locationName: locationName, dayOffset: dayOffset)
     }
     #endif
 }

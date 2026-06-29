@@ -8,7 +8,7 @@ monGARS is a native SwiftUI iOS assistant prototype with production-shaped bound
 - Use SwiftData for persistence.
 - Use an `LLMProvider` abstraction with:
   - `FoundationModelProvider` for Apple Foundation Models when the current SDK/runtime supports it.
-  - `MockLLMProvider` as the deterministic local fallback.
+  - Foundation Models as the only production local LLM provider.
   - `RemoteLLMProvider` for user-configured endpoints, disabled unless the user explicitly enables it.
 - Provide a LangGraph-inspired orchestration layer with `AgentState`, `AgentNode`, `AgentGraph`, conditional edges, checkpoint persistence, resume support, and partial response events.
 - Provide an autonomous loop with `AgentRuntime`, `AgentLoop`, `AgentPlanner`, `AgentExecutor`, `AgentObserver`, and `AgentReflector`.
@@ -18,8 +18,8 @@ monGARS is a native SwiftUI iOS assistant prototype with production-shaped bound
 - Provide context engineering through `ContextBuilder` with templates, local context composition, budget handling, truncation, and conversation summarization.
 - Provide a speech-ready abstraction using Apple Speech authorization with graceful unavailable/denied states.
 - Provide SwiftUI screens for chat, conversations, settings, memories, documents, goals/tasks, and diagnostics.
-- Provide a Settings > Developer one-button real-tool E2E report that invokes production tool implementations without `MockLLMProvider`, honors privacy/network gates, redacts sensitive values, writes an app-owned report file, and exports through the iOS share sheet.
-- Provide unit tests covering memory search/deduplication, memory-save versus memory-lookup routing, document-summary routing, tool routing, graph checkpoints/resume, autonomous runtime, approval gates, network-disabled behavior, private-LAN blocking, HTML/PDF extraction, Keychain persistence, local-file traversal rejection, context budget handling, provider fallback, and persistence models.
+- Provide a Settings > Developer one-button real-tool E2E report that invokes production tool implementations without any LLM provider, honors privacy/network gates, redacts sensitive values, writes an app-owned report file, and exports through the iOS share sheet.
+- Provide unit tests covering memory search/deduplication, memory-save versus memory-lookup routing, document-summary routing, tool routing, graph checkpoints/resume, autonomous runtime, approval gates, network-disabled behavior, private-LAN blocking, HTML/PDF extraction, Keychain persistence, local-file traversal rejection, context budget handling, provider unavailable handling, and persistence models.
 
 ## Privacy Objective
 

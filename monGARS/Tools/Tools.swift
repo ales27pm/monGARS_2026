@@ -13,9 +13,21 @@ import EventKit
 import MapKit
 #endif
 
+enum ToolOutcome: String, Codable, Sendable {
+    case success
+    case handoffPrepared
+    case needsInput
+    case blocked
+    case permissionDenied
+    case unavailable
+    case noResults
+    case failed
+}
+
 struct ToolResult: Sendable {
     var toolName: String
     var output: String
+    var outcome: ToolOutcome = .success
     var riskLevel: ToolRiskLevel = .low
     var requiresApproval: Bool = false
     var approved: Bool = true
@@ -144,7 +156,7 @@ private func normalizedIntent(_ input: String) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-private func userVisibleToolError(_ error: Error, fallback: String) -> String {
+private func userVisibleToolError(_ error: Error, defaultMessage: String) -> String {
     let nsError = error as NSError
     switch nsError.domain {
     case kCLErrorDomain:
@@ -156,7 +168,7 @@ private func userVisibleToolError(_ error: Error, fallback: String) -> String {
     default:
         let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !description.isEmpty, !description.localizedCaseInsensitiveContains("kCLErrorDomain"), !description.localizedCaseInsensitiveContains("MKErrorDomain") else {
-            return fallback
+            return defaultMessage
         }
         return description
     }
@@ -458,7 +470,7 @@ struct ReminderTool: Tool {
         }
         #endif
 
-        return ToolResult(toolName: name, output: "Reminder was not created because native Reminders access is unavailable or permission was denied.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: "Reminder was not created because native Reminders access is unavailable or permission was denied.", outcome: .permissionDenied, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "permission_or_platform_unavailable")
     }
 }
 
@@ -499,7 +511,7 @@ struct CalendarTool: Tool {
         }
         #endif
 
-        return ToolResult(toolName: name, output: "Calendar event was not created because native Calendar access is unavailable or permission was denied.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: "Calendar event was not created because native Calendar access is unavailable or permission was denied.", outcome: .permissionDenied, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "permission_or_platform_unavailable")
     }
 }
 
@@ -521,12 +533,12 @@ struct ContactsTool: Tool {
         try requirePrivacyApproval(request, toolName: name)
         let query = Self.searchQuery(from: request.input)
         guard !query.isEmpty else {
-            return ToolResult(toolName: name, output: "Provide a non-empty contact name, organization, phone-number owner, or email owner to search.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+            return .needsInput(toolName: name, output: "Provide a non-empty contact name, organization, phone-number owner, or email owner to search.", riskLevel: riskLevel, requiresApproval: true)
         }
         #if canImport(Contacts)
         let granted = try await requestContactsAccess()
         guard granted else {
-            return ToolResult(toolName: name, output: "Contacts permission was not granted.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return ToolResult(toolName: name, output: "Contacts permission was not granted.", outcome: .permissionDenied, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "permission_denied")
         }
         let store = CNContactStore()
         let keys: [CNKeyDescriptor] = [
@@ -551,9 +563,9 @@ struct ContactsTool: Tool {
             }
         }
         let output = matches.isEmpty ? "No approved contact matches found." : matches.joined(separator: "\n")
-        return ToolResult(toolName: name, output: output, riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: output, outcome: matches.isEmpty ? .noResults : .success, riskLevel: riskLevel, requiresApproval: true, approved: true)
         #else
-        return ToolResult(toolName: name, output: "Contacts are unavailable on this platform.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return .unavailable(toolName: name, output: "Contacts are unavailable on this platform.", riskLevel: riskLevel, requiresApproval: true)
         #endif
     }
 
@@ -618,33 +630,33 @@ struct WeatherTool: Tool {
                 )
                 return Self.result(for: report)
             } catch WeatherServiceError.missingAPIKey {
-                return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+                return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
             } catch WeatherServiceError.invalidEndpoint {
-                return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+                return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
             } catch WeatherServiceError.forecastUnavailable(let reason) {
-                return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
+                return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", outcome: .unavailable, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
             } catch WeatherServiceError.weatherKitUnavailable(let reason) {
-                return ToolResult(toolName: name, output: "Weather lookup needs a configured provider. WeatherKit failed: \(reason). Add an OpenWeather-compatible key in Settings or try a named location.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
+                return ToolResult(toolName: name, output: "Weather lookup needs a configured provider. WeatherKit failed: \(reason). Add an OpenWeather-compatible key in Settings or try a named location.", outcome: .unavailable, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
             } catch {
-                return ToolResult(toolName: name, output: "Weather needs either a location, like 'weather in Montreal', or current-location permission. \(userVisibleToolError(error, fallback: "Current-location lookup failed."))", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "location_unavailable")
+                return ToolResult(toolName: name, output: "Weather needs either a location, like 'weather in Montreal', or current-location permission. \(userVisibleToolError(error, defaultMessage: "Current-location lookup failed."))", outcome: .permissionDenied, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "location_unavailable")
             }
             #else
-            return ToolResult(toolName: name, output: "Provide a location for weather lookup, such as 'weather in Montreal'.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+            return ToolResult(toolName: name, output: "Provide a location for weather lookup, such as 'weather in Montreal'.", outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
             #endif
         }
         let report: WeatherReport
         do {
             report = try await Self.weatherReport(service: WeatherServiceFactory.makeConfiguredService(), requestInput: request.input, locationName: location)
         } catch WeatherServiceError.missingAPIKey {
-            return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
+            return ToolResult(toolName: name, output: WeatherServiceError.missingAPIKey.localizedDescription, outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "missing_api_key")
         } catch WeatherServiceError.invalidEndpoint {
-            return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
+            return ToolResult(toolName: name, output: WeatherServiceError.invalidEndpoint.localizedDescription, outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_configuration")
         } catch WeatherServiceError.geocodingFailed(let failedLocation) {
-            return ToolResult(toolName: name, output: WeatherServiceError.geocodingFailed(failedLocation).localizedDescription, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "geocoding_failed")
+            return ToolResult(toolName: name, output: WeatherServiceError.geocodingFailed(failedLocation).localizedDescription, outcome: .noResults, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "geocoding_failed")
         } catch WeatherServiceError.forecastUnavailable(let reason) {
-            return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
+            return ToolResult(toolName: name, output: "Weather forecast is unavailable: \(reason) Try current weather, or configure a forecast-capable provider.", outcome: .unavailable, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "forecast_unavailable")
         } catch {
-            return ToolResult(toolName: name, output: "Weather lookup failed: \(userVisibleToolError(error, fallback: "The weather provider could not complete the request."))", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
+            return ToolResult(toolName: name, output: "Weather lookup failed: \(userVisibleToolError(error, defaultMessage: "The weather provider could not complete the request."))", outcome: .failed, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "service_unavailable")
         }
         return Self.result(for: report)
     }
@@ -752,12 +764,12 @@ struct TextMessageTool: Tool {
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
         guard let phone = firstPhoneNumber(in: request.input), !phone.isEmpty else {
-            return ToolResult(toolName: name, output: "Provide a phone number to prepare an SMS.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide a phone number to prepare an SMS.", riskLevel: riskLevel, requiresApproval: true)
         }
         let body = cleanedInput(request.input, removing: ["send text", "text", "sms", phone])
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let url = "sms:\(phone)\(encodedBody.isEmpty ? "" : "&body=\(encodedBody)")"
-        return ToolResult(toolName: name, output: "Prepared approved SMS handoff: \(url). The user must confirm in Messages.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return .handoff(toolName: name, output: "Prepared approved SMS handoff: \(url). The user must confirm in Messages.", riskLevel: riskLevel, target: phone)
     }
 }
 
@@ -778,9 +790,9 @@ struct PhoneCallTool: Tool {
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
         guard let phone = firstPhoneNumber(in: request.input), !phone.isEmpty else {
-            return ToolResult(toolName: name, output: "Provide a phone number to prepare a call.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide a phone number to prepare a call.", riskLevel: riskLevel, requiresApproval: true)
         }
-        return ToolResult(toolName: name, output: "Prepared approved phone handoff: tel://\(phone). The user must confirm the call.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return .handoff(toolName: name, output: "Prepared approved phone handoff: tel://\(phone). The user must confirm the call.", riskLevel: riskLevel, target: phone)
     }
 }
 
@@ -810,6 +822,7 @@ struct EmailInboxTool: Tool {
         return ToolResult(
             toolName: name,
             output: "I cannot read your Apple Mail inbox because iOS does not expose Mail messages to third-party apps. Share or import the email text/document and I can summarize it locally.",
+            outcome: .unavailable,
             riskLevel: riskLevel,
             requiresApproval: true,
             approved: true,
@@ -836,7 +849,7 @@ struct EmailTool: Tool {
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         try requirePrivacyApproval(request, toolName: name)
         guard let email = firstEmail(in: request.input) else {
-            return ToolResult(toolName: name, output: "Provide an email address to prepare mail.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide an email address to prepare mail.", riskLevel: riskLevel, requiresApproval: true)
         }
         let body = cleanedInput(request.input, removing: ["send email", "email", "mail", email])
         var components = URLComponents()
@@ -847,14 +860,7 @@ struct EmailTool: Tool {
         }
         let url = components.url?.absoluteString ?? "mailto:\(email)"
         let nativeStatus = "The app will present native Mail compose when iOS reports Mail is configured; otherwise it will offer the system Mail URL handoff."
-        return ToolResult(
-            toolName: name,
-            output: "\(nativeStatus) Prepared approved email handoff: \(url). The user must review and send in Mail.",
-            riskLevel: riskLevel,
-            requiresApproval: true,
-            approved: true,
-            target: email
-        )
+        return .handoff(toolName: name, output: "\(nativeStatus) Prepared approved email handoff: \(url). The user must review and send in Mail.", riskLevel: riskLevel, target: email)
     }
 }
 
@@ -898,6 +904,7 @@ struct CurrentLocationTool: Tool {
             return ToolResult(
                 toolName: name,
                 output: output,
+                outcome: Self.requestsMap(request.input) ? .handoffPrepared : .success,
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -905,10 +912,11 @@ struct CurrentLocationTool: Tool {
                 latencyMs: latencyMs
             )
         } catch {
-            let message = userVisibleToolError(error, fallback: "Current location failed.")
+            let message = userVisibleToolError(error, defaultMessage: "Current location failed.")
             return ToolResult(
                 toolName: name,
                 output: "Current location failed: \(message)",
+                outcome: .permissionDenied,
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -920,6 +928,7 @@ struct CurrentLocationTool: Tool {
         return ToolResult(
             toolName: name,
             output: "Current location is unavailable on this platform.",
+            outcome: .unavailable,
             riskLevel: riskLevel,
             requiresApproval: true,
             approved: true,
@@ -988,7 +997,7 @@ struct MapsTool: Tool {
         }
         let query = cleanedInput(request.input, removing: ["open map", "map", "directions to", "directions", "navigate to", "navigate", "nearby"])
         guard !query.isEmpty else {
-            return ToolResult(toolName: name, output: "Provide a place, address, or directions destination for Maps.", riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
+            return .needsInput(toolName: name, output: "Provide a place, address, or directions destination for Maps.", riskLevel: riskLevel, requiresApproval: true)
         }
 
         #if canImport(MapKit)
@@ -1005,6 +1014,7 @@ struct MapsTool: Tool {
                 return ToolResult(
                     toolName: name,
                     output: "Prepared approved Apple Maps handoff for \(target): \(mapsURL.absoluteString)",
+                    outcome: .handoffPrepared,
                     riskLevel: riskLevel,
                     requiresApproval: true,
                     approved: true,
@@ -1018,6 +1028,7 @@ struct MapsTool: Tool {
             return ToolResult(
                 toolName: name,
                 output: "MapKit returned no local search result. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
+                outcome: .noResults,
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -1028,10 +1039,11 @@ struct MapsTool: Tool {
             )
         } catch {
             let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
-            let message = userVisibleToolError(error, fallback: "Apple Maps search could not complete that request.")
+            let message = userVisibleToolError(error, defaultMessage: "Apple Maps search could not complete that request.")
             return ToolResult(
                 toolName: name,
                 output: "MapKit search failed: \(message). Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)",
+                outcome: .failed,
                 riskLevel: riskLevel,
                 requiresApproval: true,
                 approved: true,
@@ -1041,7 +1053,7 @@ struct MapsTool: Tool {
         }
         #else
         let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
-        return ToolResult(toolName: name, output: "MapKit is unavailable on this platform. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)", riskLevel: riskLevel, requiresApproval: true, approved: true, target: "maps.apple.com", errorCategory: "platform_unavailable")
+        return ToolResult(toolName: name, output: "MapKit is unavailable on this platform. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)", outcome: .unavailable, riskLevel: riskLevel, requiresApproval: true, approved: true, target: "maps.apple.com", errorCategory: "platform_unavailable")
         #endif
     }
 
@@ -1093,14 +1105,14 @@ struct WebViewTool: Tool {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
         guard let url = firstHTTPURL(in: request.input) else {
-            return ToolResult(toolName: name, output: "Provide an http or https URL for the integrated web view.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide an http or https URL for the integrated web view.", riskLevel: riskLevel, requiresApproval: true)
         }
         do {
             try AppNetworkConfiguration.networkPolicy().validate(url)
         } catch NetworkClientError.blockedHost(let host) {
-            return ToolResult(toolName: name, output: "Web view navigation to \(host) is blocked unless Developer Mode allows local and private LAN hosts.", riskLevel: riskLevel, requiresApproval: true, approved: true, target: host, errorCategory: "blocked_host")
+            return ToolResult(toolName: name, output: "Web view navigation to \(host) is blocked unless Developer Mode allows local and private LAN hosts.", outcome: .blocked, riskLevel: riskLevel, requiresApproval: true, approved: true, target: host, errorCategory: "blocked_host")
         }
-        return ToolResult(toolName: name, output: "Approved in-app webview navigation prepared: \(url.absoluteString)", riskLevel: riskLevel, requiresApproval: true, approved: true, target: url.host)
+        return ToolResult(toolName: name, output: "Approved in-app webview navigation prepared: \(url.absoluteString)", outcome: .handoffPrepared, riskLevel: riskLevel, requiresApproval: true, approved: true, target: url.host)
     }
 }
 
@@ -1132,12 +1144,13 @@ struct WebFetchTool: Tool {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
         guard let url = firstHTTPURL(in: request.input) else {
-            return ToolResult(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: true)
         }
         let summary = try await fetchText(url: url, limit: 2_000)
         return ToolResult(
             toolName: name,
             output: summary.text.isEmpty ? "Fetched URL but no text content was returned." : summary.text,
+            outcome: summary.text.isEmpty ? .noResults : .success,
             riskLevel: riskLevel,
             requiresApproval: true,
             approved: true,
@@ -1168,11 +1181,11 @@ struct LocalFileTool: Tool {
         let lower = request.input.lowercased()
         if lower.contains("list files") {
             let files = try FileManager.default.contentsOfDirectory(atPath: workspace.path).sorted()
-            return ToolResult(toolName: name, output: files.isEmpty ? "No local agent files." : files.joined(separator: "\n"), riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return ToolResult(toolName: name, output: files.isEmpty ? "No local agent files." : files.joined(separator: "\n"), outcome: files.isEmpty ? .noResults : .success, riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
 
         guard let filename = filename(in: request.input) else {
-            return ToolResult(toolName: name, output: "Provide a filename for local file action.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide a filename for local file action.", riskLevel: riskLevel, requiresApproval: true)
         }
         let url = workspace.appendingPathComponent(filename)
 
@@ -1192,7 +1205,7 @@ struct LocalFileTool: Tool {
             return ToolResult(toolName: name, output: "Wrote local agent file: \(filename)", riskLevel: riskLevel, requiresApproval: true, approved: true)
         }
 
-        return ToolResult(toolName: name, output: "Supported local file actions: list, read, write, delete.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+        return ToolResult(toolName: name, output: "Supported local file actions: list, read, write, delete.", outcome: .needsInput, riskLevel: riskLevel, requiresApproval: true, approved: true, errorCategory: "invalid_arguments")
     }
 }
 
@@ -1200,7 +1213,42 @@ struct ToolRouter: Sendable {
     let registry: ToolRegistry
 
     func route(input: String) -> (any Tool)? {
-        registry.tools.first { $0.canHandle(input) }
+        let intent = normalizedIntent(input)
+        if isCurrentLocationIntent(intent),
+           let tool = registry.tools.first(where: { $0.name == "current_location" }) {
+            return tool
+        }
+        if isUserMemoryLookupIntent(intent),
+           let tool = registry.tools.first(where: { $0.name == "memory_lookup" }) {
+            return tool
+        }
+        return registry.tools.first { $0.canHandle(input) }
+    }
+
+    private func isCurrentLocationIntent(_ intent: String) -> Bool {
+        intent == "where am i"
+            || intent == "where am i?"
+            || intent == "where i am"
+            || intent.contains("where am i")
+            || intent.contains("where i am")
+            || intent.contains("show me where i am")
+            || intent.contains("show where i am")
+            || intent.contains("show my current location")
+            || intent.contains("show me my current location")
+            || intent.contains("my current location")
+            || intent.contains("current location")
+            || intent.contains("locate me")
+    }
+
+    private func isUserMemoryLookupIntent(_ intent: String) -> Bool {
+        intent == "what is my name"
+            || intent == "what s my name"
+            || intent == "whats my name"
+            || intent == "who am i"
+            || intent.contains("what is my name")
+            || intent.contains("what s my name")
+            || intent.contains("whats my name")
+            || intent.contains("do you know my name")
     }
 
     func execute(input: String, context: ModelContext) async throws -> ToolResult? {
@@ -1357,7 +1405,7 @@ struct MemoryLookupTool: Tool {
             records = try memoryService.search(query: request.input, context: context)
         }
         let output = records.isEmpty ? "No local memories matched." : records.map(\.content).joined(separator: "\n")
-        return ToolResult(toolName: name, output: output)
+        return ToolResult(toolName: name, output: output, outcome: records.isEmpty ? .noResults : .success)
     }
 
     private static func isNameQuery(_ input: String) -> Bool {
@@ -1452,7 +1500,7 @@ struct DocumentSearchTool: Tool {
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
         let snippets = try documentService.snippets(matching: request.input, context: context)
         let output = snippets.isEmpty ? "No imported document snippets matched." : snippets.joined(separator: "\n\n")
-        return ToolResult(toolName: name, output: output)
+        return ToolResult(toolName: name, output: output, outcome: snippets.isEmpty ? .noResults : .success)
     }
 }
 
@@ -1471,7 +1519,7 @@ struct DocumentSummaryTool: Tool {
             "\(document.title): \(document.content.prefix(180))"
         }
         let output = summaries.isEmpty ? "No documents have been imported yet." : summaries.joined(separator: "\n\n")
-        return ToolResult(toolName: name, output: output)
+        return ToolResult(toolName: name, output: output, outcome: summaries.isEmpty ? .noResults : .success)
     }
 }
 
@@ -1493,7 +1541,7 @@ struct ConversationSearchTool: Tool {
             }.prefix(3).map { "\($0.role.rawValue): \($0.content)" }
         }.prefix(8)
         let output = matches.isEmpty ? "No conversation history matched." : matches.joined(separator: "\n")
-        return ToolResult(toolName: name, output: output)
+        return ToolResult(toolName: name, output: output, outcome: matches.isEmpty ? .noResults : .success)
     }
 }
 
@@ -1533,7 +1581,7 @@ struct TaskTool: Tool {
                 try context.safeSave()
                 return ToolResult(toolName: name, output: "Completed task: \(task.title)")
             }
-            return ToolResult(toolName: name, output: "No active tasks to complete.")
+            return ToolResult(toolName: name, output: "No active tasks to complete.", outcome: .noResults)
         }
 
         let title = request.input
@@ -1574,7 +1622,7 @@ struct RemoteNetworkTool: Tool {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
         }
         guard let url = firstHTTPURL(in: request.input) else {
-            return ToolResult(toolName: name, output: "Provide an HTTP or HTTPS URL for the remote network request.", riskLevel: riskLevel, requiresApproval: true, approved: true)
+            return .needsInput(toolName: name, output: "Provide an HTTP or HTTPS URL for the remote network request.", riskLevel: riskLevel, requiresApproval: true)
         }
         let method = Self.method(from: request.input)
         let bodyText = contentAfterKeyword("body", in: request.input)

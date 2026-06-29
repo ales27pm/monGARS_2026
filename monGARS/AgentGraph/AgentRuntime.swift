@@ -139,6 +139,7 @@ private struct ToolCallSnapshot: Sendable {
     var input: String
     var output: String
     var riskLevel: String
+    var outcomeRawValue: String
     var requiresApproval: Bool
     var approved: Bool
     var target: String?
@@ -215,6 +216,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             input: DiagnosticsRedactor.redact(input, maxLength: 500),
             output: DiagnosticsRedactor.redact(result.output, maxLength: 700),
             riskLevel: result.riskLevel.rawValue,
+            outcomeRawValue: result.outcome.rawValue,
             requiresApproval: result.requiresApproval,
             approved: result.approved,
             target: DiagnosticsRedactor.redactOptional(result.target, maxLength: 160),
@@ -231,6 +233,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     input: snapshot.input,
                     output: snapshot.output,
                     riskLevel: snapshot.riskLevel,
+                    outcomeRawValue: snapshot.outcomeRawValue,
                     requiresApproval: snapshot.requiresApproval,
                     approved: snapshot.approved,
                     target: snapshot.target,
@@ -290,6 +293,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     input: toolCall.input,
                     output: toolCall.output,
                     riskLevel: toolCall.riskLevel,
+                    outcomeRawValue: toolCall.outcomeRawValue,
                     requiresApproval: toolCall.requiresApproval,
                     approved: toolCall.approved,
                     target: toolCall.target,
@@ -340,6 +344,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
                     input: toolCall.input,
                     output: toolCall.output,
                     riskLevel: toolCall.riskLevel,
+                    outcomeRawValue: toolCall.outcomeRawValue,
                     requiresApproval: toolCall.requiresApproval,
                     approved: toolCall.approved,
                     target: toolCall.target,
@@ -793,6 +798,7 @@ struct AgentLoop: Sendable {
 }
 
 enum UserFacingResponseSanitizer {
+    private static let invalidResponseMessage = "The model response did not contain user-visible content. Retry with an available on-device Foundation Models runtime or an approved remote provider."
     private static let internalHeadings = [
         "Assistant Reflection",
         "Final Decision",
@@ -813,10 +819,21 @@ enum UserFacingResponseSanitizer {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if cleaned.localizedCaseInsensitiveContains("reflect phase") || cleaned.localizedCaseInsensitiveContains("output formatting valid") {
-            return "I could not produce a useful local answer for that request."
+        if containsInvalidAssistantBoilerplate(cleaned) {
+            return invalidResponseMessage
         }
-        return cleaned.isEmpty ? "I could not produce a useful local answer for that request." : cleaned
+        return cleaned.isEmpty ? invalidResponseMessage : cleaned
+    }
+
+    private static func containsInvalidAssistantBoilerplate(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("reflect phase")
+            || lower.contains("output formatting valid")
+            || lower.contains("as an ai language model")
+            || lower.contains("as a language model")
+            || lower.contains("created by apple")
+            || lower.contains("privacy-first guidelines")
+            || lower.contains("ethical guidelines")
     }
 
     private static func extractAssistantResponse(from text: String) -> String {

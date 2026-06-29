@@ -67,8 +67,17 @@ struct DiagnosticsView: View {
             }
 
             Section("Live Tool Calls") {
-                ForEach(container.diagnostics.toolCalls.indices, id: \.self) { index in
-                    Text(container.diagnostics.toolCalls[index])
+                ForEach(container.diagnostics.toolCalls) { call in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(call.toolName)
+                            .font(.headline)
+                        Text("Input: \(call.input)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Output: \(call.output)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -231,6 +240,7 @@ struct DiagnosticsView: View {
 
             HStack(spacing: 8) {
                 Label(call.riskLevel, systemImage: "exclamationmark.shield")
+                Label(call.outcomeRawValue, systemImage: "target")
                 Label(call.approved ? "approved" : "not approved", systemImage: call.approved ? "checkmark.circle" : "xmark.circle")
                 if let target = summary.target {
                     Label(target, systemImage: "network")
@@ -266,6 +276,7 @@ struct DiagnosticsView: View {
             lines.append("Target: \(DiagnosticsRedactor.redact(call.target ?? "none", maxLength: 160))")
             lines.append("Approved: \(call.approved)")
             lines.append("Risk: \(call.riskLevel)")
+            lines.append("Outcome: \(call.outcomeRawValue)")
             lines.append("Status code: \(call.statusCode.map(String.init) ?? "none")")
             lines.append("Latency ms: \(Int(call.latencyMs))")
             lines.append("Error category: \(call.errorCategory ?? "none")")
@@ -286,7 +297,10 @@ private struct ToolCallDiagnosticsSummary {
     init(call: ToolCallRecord) {
         let output = call.output
         let lower = output.lowercased()
-        if let statusCode = call.statusCode {
+        if call.outcomeRawValue != ToolOutcome.success.rawValue {
+            status = call.outcomeRawValue
+            statusColor = Self.color(for: call.outcomeRawValue)
+        } else if let statusCode = call.statusCode {
             status = "HTTP \(statusCode)"
             statusColor = (200..<300).contains(statusCode) ? .green : .orange
         } else if call.errorCategory != nil || lower.contains("network tools are disabled") || lower.contains("api key is missing") || lower.contains("permission was not granted") || lower.contains("was not created") {
@@ -302,6 +316,19 @@ private struct ToolCallDiagnosticsSummary {
 
         target = call.target ?? Self.extractTarget(from: output) ?? Self.extractTarget(from: call.input)
         latencyText = call.latencyMs > 0 ? "\(Int(call.latencyMs)) ms" : Self.extractLatency(from: output)
+    }
+
+    private static func color(for outcomeRawValue: String) -> Color {
+        switch ToolOutcome(rawValue: outcomeRawValue) {
+        case .success:
+            return .green
+        case .handoffPrepared, .noResults, .needsInput:
+            return .orange
+        case .blocked, .permissionDenied, .unavailable, .failed:
+            return .red
+        case nil:
+            return .secondary
+        }
     }
 
     private static func extractTarget(from text: String) -> String? {

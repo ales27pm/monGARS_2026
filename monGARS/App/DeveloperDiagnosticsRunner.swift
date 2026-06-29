@@ -1,6 +1,9 @@
 import Foundation
 import SwiftData
 
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(Contacts)
 import Contacts
 #endif
@@ -28,6 +31,7 @@ private struct ToolE2EResult {
     var label: String
     var toolName: String
     var passed: Bool
+    var outcome: ToolOutcome
     var target: String?
     var statusCode: Int?
     var errorCategory: String?
@@ -36,7 +40,8 @@ private struct ToolE2EResult {
     var reportLine: String {
         var parts = [
             "- \(passed ? "PASS" : "FAIL") \(label)",
-            "tool=\(toolName)"
+            "tool=\(toolName)",
+            "outcome=\(outcome.rawValue)"
         ]
         if let target {
             parts.append("target=\(DiagnosticsRedactor.redact(target, maxLength: 80))")
@@ -71,7 +76,7 @@ enum DeveloperDiagnosticsRunner {
         appendRecentDiagnostics(context: context, to: &builder)
         builder.add("Notes")
         builder.add("- These are in-app runtime self-checks and direct real-tool E2E probes, not XCTest execution.")
-        builder.add("- No MockLLMProvider is used by this report; tools are invoked directly through their production implementations.")
+        builder.add("- No LLM provider is used by this report; tools are invoked directly through their production implementations.")
         builder.add("- Network calls and privacy-sensitive Apple integrations still require Settings enablement and user approval.")
         builder.add("- Secrets, contacts, message bodies, and token-like values are redacted before export.")
 
@@ -81,21 +86,24 @@ enum DeveloperDiagnosticsRunner {
     }
 
     private static func appendAppSection(to builder: inout ReportBuilder) {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
-        let build = info["CFBundleVersion"] as? String ?? "unknown"
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = appBuildNumber()
         let identifier = Bundle.main.bundleIdentifier ?? "unknown"
         builder.add("App")
         builder.add("- Bundle: \(identifier)")
         builder.add("- Version: \(version)")
         builder.add("- Build: \(build)")
+        builder.add("- Runtime: \(runtimePlatformDescription())")
+        builder.add("- Physical device runtime: \(isPhysicalIOSDeviceRuntime())")
+        builder.add("- Accepted on-device iteration: \(isPhysicalIOSDeviceRuntime())")
+        builder.add("- Report acceptance: \(isPhysicalIOSDeviceRuntime() ? "accepted" : "rejected - physical iOS device runtime required")")
         builder.add("")
     }
 
     @MainActor
     private static func appendRealToolE2E(container: AppContainer, context: ModelContext, to builder: inout ReportBuilder) async {
         builder.add("Real Tool E2E")
-        builder.add("- Provider mock usage: false")
+        builder.add("- LLM provider usage: false")
         builder.add("- Network toggle honored: \(container.settingsStore.remoteProviderEnabled)")
         let runID = UUID()
         var results: [ToolE2EResult] = []
@@ -119,6 +127,7 @@ enum DeveloperDiagnosticsRunner {
                 label: label,
                 toolName: result.toolName,
                 passed: expected(result),
+                outcome: result.outcome,
                 target: result.target,
                 statusCode: result.statusCode,
                 errorCategory: result.errorCategory,
@@ -139,6 +148,7 @@ enum DeveloperDiagnosticsRunner {
                 label: label,
                 toolName: toolName,
                 passed: passed,
+                outcome: errorCategory == nil ? .success : .failed,
                 target: target,
                 statusCode: statusCode,
                 errorCategory: errorCategory,
@@ -151,6 +161,7 @@ enum DeveloperDiagnosticsRunner {
                 label: label,
                 toolName: toolName,
                 passed: false,
+                outcome: .failed,
                 target: nil,
                 statusCode: nil,
                 errorCategory: "thrown_error",
@@ -159,6 +170,16 @@ enum DeveloperDiagnosticsRunner {
         }
 
         let marker = "monGARS E2E \(runID.uuidString.prefix(8))"
+        if !isPhysicalIOSDeviceRuntime() {
+            recordSynthetic(
+                "physical iOS runtime acceptance gate",
+                toolName: "runtime_acceptance",
+                passed: false,
+                output: "Report was not produced on a physical iOS device. This run is useful for debugging only and is not accepted as real on-device evidence.",
+                errorCategory: "physical_device_required"
+            )
+        }
+
         do {
             let result = try await CalculatorTool().execute(request: approved("calculate 12 * (3 + 4)"), context: context)
             record("calculator arithmetic", result) { $0.output.contains("84") }
@@ -190,15 +211,25 @@ enum DeveloperDiagnosticsRunner {
             try container.documentService.delete(document, context: context)
 
             #if canImport(PDFKit)
-            if let pdfData = DiagnosticPDFFactory.makeSelectablePDFData(text: "\(marker) selectable PDF import text") {
+            let pdfProbeText = "\(marker) selectable PDF import text"
+            if let pdfData = DiagnosticPDFFactory.makeSelectablePDFData(text: pdfProbeText) {
                 let pdfURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(marker)-diagnostic.pdf")
                 try pdfData.write(to: pdfURL, options: .atomic)
                 defer { try? FileManager.default.removeItem(at: pdfURL) }
                 try container.documentService.importDocument(url: pdfURL, context: context)
-                let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved("selectable PDF import text"), context: context)
-                record("PDF document import and search", pdfSearch) { $0.output.contains("selectable PDF import text") }
                 if let importedPDF = try container.documentService.documents(context: context).first(where: { $0.title == pdfURL.lastPathComponent }) {
+                    let rankedPDF = try container.documentService.rankedSnippets(matching: pdfProbeText, context: context, limit: 1)
+                    let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(pdfProbeText), context: context)
+                    let rawImportMatched = importedPDF.content.contains(pdfProbeText)
+                    let indexedChunkMatched = rankedPDF.contains { result in
+                        result.documentID == importedPDF.id && result.chunkText.contains(pdfProbeText)
+                    }
+                    record("PDF document import and search", pdfSearch) {
+                        rawImportMatched && indexedChunkMatched && $0.output.contains(importedPDF.title)
+                    }
                     try container.documentService.delete(importedPDF, context: context)
+                } else {
+                    recordSynthetic("PDF document import and search", toolName: "document_search", passed: false, output: "Imported diagnostic PDF was not found in SwiftData.", errorCategory: "document_import_missing")
                 }
             } else {
                 recordSynthetic("PDF document import and search", toolName: "document_search", passed: false, output: "Could not generate diagnostic PDF data.", errorCategory: "pdf_generation_unavailable")
@@ -315,8 +346,8 @@ enum DeveloperDiagnosticsRunner {
             let result = try await ContactsTool().execute(request: request("find contact monGARS-no-real-contact-\(marker)", false), context: context)
             record("contacts lookup", result) {
                 $0.output.contains("No approved contact matches")
-                    || $0.output.contains("permission was not granted")
-                    || $0.output.contains("unavailable")
+                    || $0.errorCategory == "permission_denied"
+                    || $0.errorCategory == "platform_unavailable"
                     || $0.errorCategory == "invalid_arguments"
             }
         } catch { recordError("contacts lookup", "contacts_lookup", error) }
@@ -325,7 +356,7 @@ enum DeveloperDiagnosticsRunner {
             let result = try await CalendarTool().execute(request: request("create calendar event \(marker) tomorrow", false), context: context)
             record("calendar create", result) {
                 $0.output.contains("Created approved calendar event")
-                    || $0.output.contains("not created because native Calendar access is unavailable or permission was denied")
+                    || $0.errorCategory == "permission_or_platform_unavailable"
             }
         } catch { recordError("calendar create", "calendar_manager", error) }
 
@@ -333,7 +364,7 @@ enum DeveloperDiagnosticsRunner {
             let result = try await ReminderTool().execute(request: request("remind me to \(marker)", false), context: context)
             record("reminder create", result) {
                 $0.output.contains("Created approved reminder")
-                    || $0.output.contains("not created because native Reminders access is unavailable or permission was denied")
+                    || $0.errorCategory == "permission_or_platform_unavailable"
             }
         } catch { recordError("reminder create", "reminder_manager", error) }
 
@@ -764,8 +795,9 @@ enum DeveloperDiagnosticsRunner {
         recordSynthetic("PDFKit extraction local", "pdf_text_extractor", false, "PDFKit is unavailable.", nil, nil, "platform_unavailable")
         #endif
 
+        let currentBuild = appBuildNumber()
         let rawSensitive = """
-        Build: 202606280905
+        Build: \(currentBuild)
         Current location: 46.00604, -73.16488
         Prepared approved SMS handoff: sms:15551234567&body=secret body.
         Authorization: Bearer hidden-token
@@ -774,7 +806,7 @@ enum DeveloperDiagnosticsRunner {
         recordSynthetic(
             "diagnostics redaction self-check",
             "diagnostics_redactor",
-            redacted.contains("202606280905")
+            redacted.contains(currentBuild)
                 && redacted.contains("46.00604, -73.16488")
                 && !redacted.contains("15551234567")
                 && !redacted.contains("secret body")
@@ -784,6 +816,34 @@ enum DeveloperDiagnosticsRunner {
             nil,
             nil
         )
+    }
+
+    private static func appBuildNumber() -> String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+    }
+
+    private static func runtimePlatformDescription() -> String {
+        #if targetEnvironment(simulator)
+        return "iOS Simulator"
+        #elseif os(iOS)
+        #if canImport(UIKit)
+        return "physical iOS device (\(UIDevice.current.model), \(UIDevice.current.systemVersion))"
+        #else
+        return "physical iOS device"
+        #endif
+        #elseif os(macOS)
+        return "macOS"
+        #else
+        return "unknown"
+        #endif
+    }
+
+    private static func isPhysicalIOSDeviceRuntime() -> Bool {
+        #if os(iOS) && !targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
     }
 
     private static func appendConfigurationSection(settings: SettingsStore, to builder: inout ReportBuilder) {
@@ -917,7 +977,7 @@ enum DeveloperDiagnosticsRunner {
             builder.add("- Tool calls: none")
         } else {
             for call in toolCalls {
-                builder.add("- Tool \(call.toolName): approved=\(call.approved), target=\(DiagnosticsRedactor.redact(call.target ?? "none", maxLength: 80)), status=\(call.statusCode.map(String.init) ?? "none"), error=\(call.errorCategory ?? "none"), latencyMs=\(Int(call.latencyMs))")
+                builder.add("- Tool \(call.toolName): outcome=\(call.outcomeRawValue), approved=\(call.approved), target=\(DiagnosticsRedactor.redact(call.target ?? "none", maxLength: 80)), status=\(call.statusCode.map(String.init) ?? "none"), error=\(call.errorCategory ?? "none"), latencyMs=\(Int(call.latencyMs))")
             }
         }
         builder.add("")
