@@ -51,12 +51,16 @@ enum DiagnosticPDFFactory {
     static func makeSelectablePDFData(text: String) -> Data? {
         #if canImport(UIKit)
         let data = NSMutableData()
-        UIGraphicsBeginPDFContextToData(data, CGRect(x: 0, y: 0, width: 300, height: 180), nil)
+        let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let textRect = pageRect.insetBy(dx: 48, dy: 72)
+        UIGraphicsBeginPDFContextToData(data, pageRect, nil)
         UIGraphicsBeginPDFPage()
-        (text as NSString).draw(
-            at: CGPoint(x: 24, y: 64),
-            withAttributes: [.font: UIFont.systemFont(ofSize: 14)]
-        )
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        (text as NSString).draw(in: textRect, withAttributes: [
+            .font: UIFont.systemFont(ofSize: 14),
+            .paragraphStyle: paragraph
+        ])
         UIGraphicsEndPDFContext()
         return data as Data
         #else
