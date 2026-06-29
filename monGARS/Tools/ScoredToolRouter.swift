@@ -29,6 +29,22 @@ struct ToolRouteDecision: Sendable {
     }
 }
 
+enum ToolApprovalPolicy {
+    static func requiresApproval(tool: any Tool, autonomyLevel: AutonomyLevel) -> Bool {
+        if tool.riskLevel == .destructive || tool.riskLevel == .high {
+            return true
+        }
+        switch autonomyLevel {
+        case .manual:
+            return tool.requiresApproval
+        case .assisted:
+            return tool.riskLevel == .medium
+        case .semiAuto, .auto:
+            return false
+        }
+    }
+}
+
 private struct ToolRouteCandidate {
     var tool: any Tool
     var confidence: Double
@@ -39,7 +55,7 @@ extension ToolRouter {
     private var minimumRouteConfidence: Double { 0.35 }
     private var ambiguityMargin: Double { 0.08 }
 
-    func routeDecision(input: String) -> ToolRouteDecision {
+    func routeDecision(input: String, autonomyLevel: AutonomyLevel = .assisted) -> ToolRouteDecision {
         let candidates = registry.tools
             .map { score(tool: $0, input: input) }
             .filter { $0.confidence > 0 }
@@ -88,7 +104,7 @@ extension ToolRouter {
             confidence: winner.confidence,
             anchoredJustification: justificationParts.joined(separator: " | "),
             riskLevel: riskLevel,
-            requiresApproval: winner.tool.requiresApproval || riskLevel.requiresApprovalByDefault,
+            requiresApproval: ToolApprovalPolicy.requiresApproval(tool: winner.tool, autonomyLevel: autonomyLevel),
             abstained: false,
             abstentionReason: nil,
             competingToolName: candidates.dropFirst().first?.tool.name,
@@ -98,6 +114,9 @@ extension ToolRouter {
 
     func execute(decision: ToolRouteDecision, request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult? {
         guard !decision.abstained, let tool = decision.tool else { return nil }
+        if decision.requiresApproval && !request.approved {
+            throw AgentRuntimeError.approvalRequired(decision.toolName ?? tool.name)
+        }
         return try await tool.execute(request: request, context: context)
     }
 
@@ -112,14 +131,14 @@ extension ToolRouter {
         }
 
         let profile = ToolRouteScorer.profile(for: tool.name)
-        let matchedPositive = profile.positiveKeywords.filter { normalized.contains($0) }
+        let matchedPositive = profile.positiveKeywords.filter { ToolRouteScorer.keyword($0, matches: normalized) }
         if !matchedPositive.isEmpty {
             let keywordScore = min(0.35, Double(matchedPositive.count) * 0.08)
             score += keywordScore
             evidence.append("keywords: \(matchedPositive.prefix(5).joined(separator: ", "))")
         }
 
-        let matchedNegative = profile.negativeKeywords.filter { normalized.contains($0) }
+        let matchedNegative = profile.negativeKeywords.filter { ToolRouteScorer.keyword($0, matches: normalized) }
         if !matchedNegative.isEmpty {
             score -= min(0.35, Double(matchedNegative.count) * 0.10)
             evidence.append("negative keywords: \(matchedNegative.prefix(5).joined(separator: ", "))")
@@ -128,7 +147,7 @@ extension ToolRouter {
         if profile.requiresURL, ToolRouteScorer.containsHTTPURL(input) {
             score += 0.18
             evidence.append("http_url present")
-        } else if profile.requiresURL, normalized.contains("url") || normalized.contains("website") {
+        } else if profile.requiresURL, ToolRouteScorer.keyword("url", matches: normalized) || ToolRouteScorer.keyword("website", matches: normalized) {
             score += 0.08
             evidence.append("url intent present")
         }
@@ -219,7 +238,7 @@ private enum ToolRouteScorer {
         case "web_fetch":
             ToolRouteProfile(positiveKeywords: ["web fetch", "fetch", "download url", "read url", "extract page"], requiresURL: true)
         case "remote_network":
-            ToolRouteProfile(positiveKeywords: ["remote network", "remote http", "network request", "get ", "post ", "put ", "patch ", "delete "], requiresURL: true)
+            ToolRouteProfile(positiveKeywords: ["remote network", "remote http", "network request", "get", "post", "put", "patch", "delete"], requiresURL: true)
         case "local_file":
             ToolRouteProfile(positiveKeywords: ["local file", "list files", "read file", "write file", "delete file", "agent file"])
         case "contacts_lookup":
@@ -246,6 +265,21 @@ private enum ToolRouteScorer {
             .replacingOccurrences(of: #"[^\p{L}\p{N}\s:/\.@+\-]"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func keyword(_ keyword: String, matches normalizedInput: String) -> Bool {
+        let inputTokens = normalizedInput.split(separator: " ").map(String.init)
+        let keywordTokens = normalized(keyword).split(separator: " ").map(String.init)
+        guard !keywordTokens.isEmpty, inputTokens.count >= keywordTokens.count else { return false }
+        if keywordTokens.count == 1 {
+            return inputTokens.contains(keywordTokens[0])
+        }
+        for start in 0...(inputTokens.count - keywordTokens.count) {
+            if Array(inputTokens[start..<(start + keywordTokens.count)]) == keywordTokens {
+                return true
+            }
+        }
+        return false
     }
 
     static func containsHTTPURL(_ input: String) -> Bool {
