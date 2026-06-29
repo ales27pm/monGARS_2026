@@ -99,7 +99,7 @@ struct ContextBuilder: Sendable {
         }
         let fullPrompt = LLMPromptAssembler.assemble(segments: segments)
         let prompt = truncate(fullPrompt, budget: budget, protectedPrefixes: protectedPrefixes(for: phase))
-        let packageSegments = prompt == fullPrompt ? segments : [trusted("Rendered prompt", prompt)]
+        let packageSegments = prompt == fullPrompt ? segments : renderedSegments(from: prompt)
         return ContextPackage(prompt: prompt, segments: packageSegments, conversationSummary: conversationSummary, memories: Array(memories), documents: Array(documents), budget: budget)
     }
 
@@ -213,6 +213,55 @@ struct ContextBuilder: Sendable {
 
     private func untrusted(_ title: String, _ items: [String]) -> LLMPromptSegment {
         LLMPromptSegment(title: title, body: items.joined(separator: "\n\n"), trustLevel: .untrustedData)
+    }
+
+    private func renderedSegments(from prompt: String) -> [LLMPromptSegment] {
+        let lines = prompt.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var segments: [LLMPromptSegment] = []
+        var trustedLines: [String] = []
+        var index = 0
+
+        func flushTrusted() {
+            let body = trustedLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !body.isEmpty {
+                segments.append(LLMPromptSegment(title: "Rendered trusted prompt", body: body, trustLevel: .trustedInstruction))
+            }
+            trustedLines.removeAll()
+        }
+
+        while index < lines.count {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix("BEGIN UNTRUSTED ") else {
+                trustedLines.append(lines[index])
+                index += 1
+                continue
+            }
+
+            flushTrusted()
+            let title = String(line.dropFirst("BEGIN UNTRUSTED ".count))
+            index += 1
+            var untrustedLines: [String] = []
+            while index < lines.count {
+                let current = lines[index]
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed == "END UNTRUSTED \(title)" {
+                    index += 1
+                    break
+                }
+                if current.hasPrefix("> ") {
+                    untrustedLines.append(String(current.dropFirst(2)))
+                } else if current == ">" {
+                    untrustedLines.append("")
+                } else {
+                    untrustedLines.append(current)
+                }
+                index += 1
+            }
+            segments.append(LLMPromptSegment(title: title, body: untrustedLines.joined(separator: "\n"), trustLevel: .untrustedData))
+        }
+
+        flushTrusted()
+        return segments.isEmpty ? [trusted("Rendered trusted prompt", prompt)] : segments
     }
 
     private static func shouldFetchReferenceContext(phase: AgentPhase, toolResults: [String]) -> Bool {

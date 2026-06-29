@@ -1359,7 +1359,11 @@ struct MonGARSTests {
         #expect(package.prompt.contains("Final answer contract:"))
         #expect(package.prompt.contains("Return only the user-visible answer"))
         #expect(!package.prompt.contains("OVERSIZED_TOOL_RESULT detail detail detail detail detail detail detail detail detail detail"))
-        #expect(package.segments == [LLMPromptSegment(title: "Rendered prompt", body: package.prompt, trustLevel: .trustedInstruction)])
+        #expect(!package.segments.contains { segment in
+            segment.trustLevel == .trustedInstruction &&
+            (segment.body.contains("BEGIN UNTRUSTED") || segment.body.contains("END UNTRUSTED"))
+        })
+        #expect(package.segments.contains { $0.title == "LATEST TOOL RESULT" && $0.trustLevel == .untrustedData })
     }
 
     @Test func foundationProviderPlacesReferenceContextBeforePromptContract() {
