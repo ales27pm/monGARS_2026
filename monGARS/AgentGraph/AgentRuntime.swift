@@ -74,12 +74,8 @@ actor AgentApprovalGate {
     private var cancelledRunIDs: Set<UUID> = []
 
     func suspend(runID: UUID, approvalID: UUID) async -> ApprovalDecision {
-        if cancelledRunIDs.contains(runID) {
-            return .rejected
-        }
-        if let decision = resolvedDecisions.removeValue(forKey: approvalID) {
-            return decision
-        }
+        if cancelledRunIDs.contains(runID) { return .rejected }
+        if let decision = resolvedDecisions.removeValue(forKey: approvalID) { return decision }
 
         return await withCheckedContinuation { continuation in
             if cancelledRunIDs.contains(runID) {
@@ -108,7 +104,6 @@ actor AgentApprovalGate {
         let approvalIDs = continuations.compactMap { approvalID, waiter in
             waiter.runID == runID ? approvalID : nil
         }
-
         for approvalID in approvalIDs {
             continuations.removeValue(forKey: approvalID)?.continuation.resume(returning: .rejected)
         }
@@ -176,15 +171,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: DiagnosticsRedactor.redact(message, maxLength: 600), toolName: toolName, latencyMs: latencyMs, createdAt: .now)
         lock.withLock {
             if let inMemoryContext {
-                inMemoryContext.insert(AgentTraceRecord(
-                    runID: snapshot.runID,
-                    stepIndex: snapshot.stepIndex,
-                    phase: snapshot.phase,
-                    message: snapshot.message,
-                    toolName: snapshot.toolName,
-                    latencyMs: snapshot.latencyMs,
-                    createdAt: snapshot.createdAt
-                ))
+                inMemoryContext.insert(AgentTraceRecord(runID: snapshot.runID, stepIndex: snapshot.stepIndex, phase: snapshot.phase, message: snapshot.message, toolName: snapshot.toolName, latencyMs: snapshot.latencyMs, createdAt: snapshot.createdAt))
             } else {
                 traces.append(snapshot)
             }
@@ -195,13 +182,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: DiagnosticsRedactor.redact(stateSummary, maxLength: 360), stateData: stateData, createdAt: .now)
         lock.withLock {
             if let inMemoryContext {
-                inMemoryContext.insert(AgentCheckpointRecord(
-                    runID: snapshot.runID,
-                    nodeID: snapshot.nodeID,
-                    stateSummary: snapshot.stateSummary,
-                    stateData: snapshot.stateData,
-                    createdAt: snapshot.createdAt
-                ))
+                inMemoryContext.insert(AgentCheckpointRecord(runID: snapshot.runID, nodeID: snapshot.nodeID, stateSummary: snapshot.stateSummary, stateData: snapshot.stateData, createdAt: snapshot.createdAt))
             } else {
                 checkpoints.append(snapshot)
             }
@@ -225,20 +206,7 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         )
         lock.withLock {
             if let inMemoryContext {
-                inMemoryContext.insert(ToolCallRecord(
-                    runID: snapshot.runID,
-                    toolName: snapshot.toolName,
-                    input: snapshot.input,
-                    output: snapshot.output,
-                    riskLevel: snapshot.riskLevel,
-                    requiresApproval: snapshot.requiresApproval,
-                    approved: snapshot.approved,
-                    target: snapshot.target,
-                    statusCode: snapshot.statusCode,
-                    latencyMs: snapshot.latencyMs,
-                    errorCategory: snapshot.errorCategory,
-                    createdAt: snapshot.createdAt
-                ))
+                inMemoryContext.insert(ToolCallRecord(runID: snapshot.runID, toolName: snapshot.toolName, input: snapshot.input, output: snapshot.output, riskLevel: snapshot.riskLevel, requiresApproval: snapshot.requiresApproval, approved: snapshot.approved, target: snapshot.target, statusCode: snapshot.statusCode, latencyMs: snapshot.latencyMs, errorCategory: snapshot.errorCategory, createdAt: snapshot.createdAt))
             } else {
                 toolCalls.append(snapshot)
             }
@@ -262,44 +230,14 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
         }
 
         for trace in payload.0 {
-            context.insert(AgentTraceRecord(
-                runID: trace.runID,
-                stepIndex: trace.stepIndex,
-                phase: trace.phase,
-                message: trace.message,
-                toolName: trace.toolName,
-                latencyMs: trace.latencyMs,
-                createdAt: trace.createdAt
-            ))
+            context.insert(AgentTraceRecord(runID: trace.runID, stepIndex: trace.stepIndex, phase: trace.phase, message: trace.message, toolName: trace.toolName, latencyMs: trace.latencyMs, createdAt: trace.createdAt))
         }
-
         for checkpoint in payload.1 {
-            context.insert(AgentCheckpointRecord(
-                runID: checkpoint.runID,
-                nodeID: checkpoint.nodeID,
-                stateSummary: checkpoint.stateSummary,
-                stateData: checkpoint.stateData,
-                createdAt: checkpoint.createdAt
-            ))
+            context.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.stateSummary, stateData: checkpoint.stateData, createdAt: checkpoint.createdAt))
         }
-
         for toolCall in payload.2 {
-                context.insert(ToolCallRecord(
-                    runID: toolCall.runID,
-                    toolName: toolCall.toolName,
-                    input: toolCall.input,
-                    output: toolCall.output,
-                    riskLevel: toolCall.riskLevel,
-                    requiresApproval: toolCall.requiresApproval,
-                    approved: toolCall.approved,
-                    target: toolCall.target,
-                    statusCode: toolCall.statusCode,
-                    latencyMs: toolCall.latencyMs,
-                    errorCategory: toolCall.errorCategory,
-                    createdAt: toolCall.createdAt
-                ))
-            }
-
+            context.insert(ToolCallRecord(runID: toolCall.runID, toolName: toolCall.toolName, input: toolCall.input, output: toolCall.output, riskLevel: toolCall.riskLevel, requiresApproval: toolCall.requiresApproval, approved: toolCall.approved, target: toolCall.target, statusCode: toolCall.statusCode, latencyMs: toolCall.latencyMs, errorCategory: toolCall.errorCategory, createdAt: toolCall.createdAt))
+        }
         try context.safeSave()
     }
 
@@ -310,47 +248,17 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             let toolCallRecords = try sourceContext.fetch(FetchDescriptor<ToolCallRecord>()).filter { $0.runID == runID }
 
             for trace in traceRecords {
-                destinationContext.insert(AgentTraceRecord(
-                    runID: trace.runID,
-                    stepIndex: trace.stepIndex,
-                    phase: trace.phase,
-                    message: trace.message,
-                    toolName: trace.toolName,
-                    latencyMs: trace.latencyMs,
-                    createdAt: trace.createdAt
-                ))
+                destinationContext.insert(AgentTraceRecord(runID: trace.runID, stepIndex: trace.stepIndex, phase: trace.phase, message: trace.message, toolName: trace.toolName, latencyMs: trace.latencyMs, createdAt: trace.createdAt))
                 sourceContext.delete(trace)
             }
-
             for checkpoint in checkpointRecords {
-                destinationContext.insert(AgentCheckpointRecord(
-                    runID: checkpoint.runID,
-                    nodeID: checkpoint.nodeID,
-                    stateSummary: checkpoint.stateSummary,
-                    stateData: checkpoint.stateData,
-                    createdAt: checkpoint.createdAt
-                ))
+                destinationContext.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.stateSummary, stateData: checkpoint.stateData, createdAt: checkpoint.createdAt))
                 sourceContext.delete(checkpoint)
             }
-
             for toolCall in toolCallRecords {
-                destinationContext.insert(ToolCallRecord(
-                    runID: toolCall.runID,
-                    toolName: toolCall.toolName,
-                    input: toolCall.input,
-                    output: toolCall.output,
-                    riskLevel: toolCall.riskLevel,
-                    requiresApproval: toolCall.requiresApproval,
-                    approved: toolCall.approved,
-                    target: toolCall.target,
-                    statusCode: toolCall.statusCode,
-                    latencyMs: toolCall.latencyMs,
-                    errorCategory: toolCall.errorCategory,
-                    createdAt: toolCall.createdAt
-                ))
+                destinationContext.insert(ToolCallRecord(runID: toolCall.runID, sessionID: toolCall.sessionID, toolName: toolCall.toolName, input: toolCall.input, output: toolCall.output, riskLevel: toolCall.riskLevel, requiresApproval: toolCall.requiresApproval, approved: toolCall.approved, target: toolCall.target, payloadHash: toolCall.payloadHash, statusCode: toolCall.statusCode, latencyMs: toolCall.latencyMs, errorCategory: toolCall.errorCategory, createdAt: toolCall.createdAt))
                 sourceContext.delete(toolCall)
             }
-
             try sourceContext.safeSave()
             try destinationContext.safeSave()
         }
@@ -366,21 +274,12 @@ struct AgentLoop: Sendable {
     let approvalGate: AgentApprovalGate
     let telemetryBuffer: AgentTelemetryBuffer
 
-    func run(
-        runID: UUID = UUID(),
-        goal: String,
-        conversationID: UUID?,
-        messages: [String],
-        provider: any LLMProvider,
-        options: AgentRuntimeOptions,
-        context: ModelContext
-    ) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
+    func run(runID: UUID = UUID(), goal: String, conversationID: UUID?, messages: [String], provider: any LLMProvider, options: AgentRuntimeOptions, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
                 let startedAt = Date()
                 var state = AgentLoopState(runID: runID, goal: goal)
                 let runRecord = AgentRunRecord(id: state.runID, conversationID: conversationID, goal: goal, autonomyLevelRawValue: options.autonomyLevel.rawValue, maxSteps: options.maxSteps)
-
                 do {
                     context.insert(runRecord)
                     try context.safeSave()
@@ -406,9 +305,7 @@ struct AgentLoop: Sendable {
                     }
                 }
             }
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -418,77 +315,42 @@ struct AgentLoop: Sendable {
                 do {
                     let descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
                     let checkpoint = try context.fetch(descriptor).first { $0.runID == run.id && $0.stateData != nil }
-                    guard let data = checkpoint?.stateData else {
-                        throw AgentRuntimeError.resumeCheckpointUnavailable
-                    }
-
+                    guard let data = checkpoint?.stateData else { throw AgentRuntimeError.resumeCheckpointUnavailable }
                     var state = try JSONDecoder().decode(AgentLoopState.self, from: data)
                     run.statusRawValue = AgentRunStatus.running.rawValue
                     run.requiresApproval = false
                     run.updatedAt = .now
                     try context.safeSave()
-                    try await continueRun(
-                        goal: run.goal,
-                        conversationID: run.conversationID,
-                        messages: [],
-                        provider: provider,
-                        options: options ?? AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps),
-                        context: context,
-                        state: &state,
-                        runRecord: run,
-                        startedAt: .now,
-                        continuation: continuation
-                    )
+                    try await continueRun(goal: run.goal, conversationID: run.conversationID, messages: [], provider: provider, options: options ?? AgentRuntimeOptions(autonomyLevel: AutonomyLevel(rawValue: run.autonomyLevelRawValue) ?? .assisted, maxSteps: run.maxSteps), context: context, state: &state, runRecord: run, startedAt: .now, continuation: continuation)
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    private func continueRun(
-        goal: String,
-        conversationID: UUID?,
-        messages: [String],
-        provider: any LLMProvider,
-        options: AgentRuntimeOptions,
-        context: ModelContext,
-        state: inout AgentLoopState,
-        runRecord: AgentRunRecord,
-        startedAt: Date,
-        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation
-    ) async throws {
+    private func continueRun(goal: String, conversationID: UUID?, messages: [String], provider: any LLMProvider, options: AgentRuntimeOptions, context: ModelContext, state: inout AgentLoopState, runRecord: AgentRunRecord, startedAt: Date, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) async throws {
         if needsPhase(.understandIntent, state: state) {
-            try await runPhase(.understandIntent, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                "Intent understood: \(goal)"
-            }
+            try await runPhase(.understandIntent, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Intent understood: \(goal)" }
         }
 
         var contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .retrieveContext, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.retrieveContext, state: state) {
             state.retrievedContext = contextPackage.memories + contextPackage.documents
-            try await runPhase(.retrieveContext, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                "Retrieved \(contextPackage.memories.count) memories and \(contextPackage.documents.count) document snippets."
-            }
+            try await runPhase(.retrieveContext, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Retrieved \(contextPackage.memories.count) memories and \(contextPackage.documents.count) document snippets." }
         }
 
         if needsPhase(.plan, state: state) {
             state.plan = planner.makePlan(goal: goal, contextPackage: contextPackage)
             let planMessage = state.plan?.steps.joined(separator: " -> ") ?? "No plan."
-            try await runPhase(.plan, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                planMessage
-            }
+            try await runPhase(.plan, state: &state, runRecord: runRecord, context: context, continuation: continuation) { planMessage }
         }
 
         let tool = executor.selectedTool(for: goal)
         if needsPhase(.selectTool, state: state) {
             state.selectedToolName = tool?.name
-            try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                tool.map { "Selected tool: \($0.name)" } ?? "No tool required."
-            }
+            try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { tool.map { "Selected tool: \($0.name)" } ?? "No tool required." }
         }
 
         if let tool, needsPhase(.executeTool, state: state) {
@@ -497,20 +359,16 @@ struct AgentLoop: Sendable {
                 let result = ToolResult.networkDisabled(toolName: tool.name, riskLevel: tool.riskLevel, target: metadata.targetPreview)
                 state.toolResults.append(result.output)
                 telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
-                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                    result.output
-                }
+                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { result.output }
                 let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
                 state.observations.append(observation)
-                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                    observation
-                }
+                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observation }
             } else {
                 if requiresApproval(tool: tool, autonomyLevel: options.autonomyLevel) {
                     let decision = try await requestApprovalIfNeeded(tool: tool, goal: goal, options: options, state: &state, runRecord: runRecord, context: context, continuation: continuation)
                     guard decision == .approved else {
                         state.status = .failed
-                        state.finalResponse = "I did not run \(tool.name) because approval was rejected."
+                        state.finalResponse = "I did not run \(tool.name) because approval was rejected or expired."
                         runRecord.statusRawValue = state.status.rawValue
                         runRecord.lastError = AgentRuntimeError.approvalRejected(tool.name).localizedDescription
                         runRecord.summary = state.finalResponse
@@ -530,31 +388,22 @@ struct AgentLoop: Sendable {
                     state.toolResults.append(result.output)
                     telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
                 }
-                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                    result?.output ?? "Tool produced no output."
-                }
-
+                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { result?.output ?? "Tool produced no output." }
                 let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
                 state.observations.append(observation)
-                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                    observation
-                }
+                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observation }
             }
         }
 
         if needsPhase(.reflect, state: state) {
             state.reflection = reflector.reflect(goal: goal, plan: state.plan, observations: state.observations)
             let reflectionMessage = state.reflection
-            try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                reflectionMessage
-            }
+            try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) { reflectionMessage }
         }
 
         contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .reflect, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
-            if Date().timeIntervalSince(startedAt) > options.timeoutSeconds {
-                throw AgentRuntimeError.timedOut
-            }
+            if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
             let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
             var accumulated = ""
             for word in response.split(separator: " ") {
@@ -564,17 +413,13 @@ struct AgentLoop: Sendable {
             }
             state.finalResponse = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
             let responseMessage = state.finalResponse
-            try await runPhase(.respond, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                responseMessage
-            }
+            try await runPhase(.respond, state: &state, runRecord: runRecord, context: context, continuation: continuation) { responseMessage }
         }
 
         if state.plan?.shouldRemember == true, state.selectedToolName != "memory_save", needsPhase(.saveMemory, state: state) {
             let memory = durableMemory(from: goal, state: state)
             try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
-            try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                "Saved memory: \(memory)"
-            }
+            try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Saved memory: \(memory)" }
         }
 
         state.status = .completed
@@ -588,21 +433,10 @@ struct AgentLoop: Sendable {
         continuation.finish()
     }
 
-    private func runPhase(
-        _ phase: AgentPhase,
-        state: inout AgentLoopState,
-        runRecord: AgentRunRecord,
-        context: ModelContext,
-        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation,
-        message: () -> String
-    ) async throws {
+    private func runPhase(_ phase: AgentPhase, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation, message: () -> String) async throws {
         try Task.checkCancellation()
-        if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue {
-            throw AgentRuntimeError.cancelled
-        }
-        if runRecord.statusRawValue == AgentRunStatus.paused.rawValue {
-            throw AgentRuntimeError.paused
-        }
+        if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue { throw AgentRuntimeError.cancelled }
+        if runRecord.statusRawValue == AgentRunStatus.paused.rawValue { throw AgentRuntimeError.paused }
         state.phase = phase
         state.stepIndex += 1
         if state.stepIndex > runRecord.maxSteps {
@@ -616,9 +450,7 @@ struct AgentLoop: Sendable {
         runRecord.currentStep = state.stepIndex
         runRecord.updatedAt = .now
         let text = message()
-        if !state.completedNodeIDs.contains(phase.rawValue) {
-            state.completedNodeIDs.append(phase.rawValue)
-        }
+        if !state.completedNodeIDs.contains(phase.rawValue) { state.completedNodeIDs.append(phase.rawValue) }
         telemetryBuffer.appendTrace(runID: state.runID, stepIndex: state.stepIndex, phase: phase.rawValue, message: text)
         try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: true)
         continuation.yield(.status(runID: state.runID, phase: phase, message: phase.statusText))
@@ -634,16 +466,12 @@ struct AgentLoop: Sendable {
         !state.completedNodeIDs.contains(phase.rawValue)
     }
 
-    private func requestApprovalIfNeeded(
-        tool: any Tool,
-        goal: String,
-        options: AgentRuntimeOptions,
-        state: inout AgentLoopState,
-        runRecord: AgentRunRecord,
-        context: ModelContext,
-        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation
-    ) async throws -> ApprovalDecision {
+    private func requestApprovalIfNeeded(tool: any Tool, goal: String, options: AgentRuntimeOptions, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) async throws -> ApprovalDecision {
         if let approval = try approvalRecord(runID: state.runID, toolName: tool.name, context: context) {
+            if approval.isExpired() {
+                try markApprovalExpired(approval, context: context)
+                return .rejected
+            }
             if let approved = approval.approved {
                 if approved {
                     state.status = .running
@@ -661,11 +489,8 @@ struct AgentLoop: Sendable {
             runRecord.updatedAt = .now
             try context.safeSave()
             continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
-
             let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
-            if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue {
-                throw AgentRuntimeError.cancelled
-            }
+            if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue { throw AgentRuntimeError.cancelled }
             runRecord.requiresApproval = false
             runRecord.updatedAt = .now
             if decision == .approved {
@@ -676,10 +501,19 @@ struct AgentLoop: Sendable {
             return decision
         }
 
+        let metadata = tool.metadata(for: goal)
+        let target = metadata.targetPreview
+        let reason = approvalReason(tool: tool, goal: goal, autonomyLevel: options.autonomyLevel, metadata: metadata)
         let approval = ApprovalRequestRecord(
             runID: state.runID,
             actionName: tool.name,
-            reason: approvalReason(tool: tool, goal: goal, autonomyLevel: options.autonomyLevel)
+            reason: reason,
+            sessionID: state.runID,
+            toolName: tool.name,
+            target: target,
+            normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: tool.name, input: goal, target: target),
+            riskLevelRawValue: tool.riskLevel.rawValue,
+            userVisibleDiff: approvalUserVisibleDiff(tool: tool, goal: goal, metadata: metadata)
         )
         context.insert(approval)
 
@@ -687,17 +521,13 @@ struct AgentLoop: Sendable {
         runRecord.statusRawValue = state.status.rawValue
         runRecord.requiresApproval = true
         runRecord.updatedAt = .now
-        try await runPhase(.askUser, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-            "Approval requested for \(tool.name): \(approval.reason)"
-        }
+        try await runPhase(.askUser, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Approval requested for \(tool.name): \(approval.reason)" }
         try recordCheckpoint(state: state, nodeID: AgentPhase.askUser.rawValue, context: context, includeStateData: true)
         try telemetryBuffer.flush(runID: state.runID, to: context)
 
         continuation.yield(.approvalRequired(runID: state.runID, approvalID: approval.id, toolName: tool.name, reason: approval.reason))
         let decision = await approvalGate.suspend(runID: state.runID, approvalID: approval.id)
-        if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue {
-            throw AgentRuntimeError.cancelled
-        }
+        if runRecord.statusRawValue == AgentRunStatus.cancelled.rawValue { throw AgentRuntimeError.cancelled }
         runRecord.requiresApproval = false
         runRecord.updatedAt = .now
         if decision == .approved {
@@ -709,69 +539,57 @@ struct AgentLoop: Sendable {
     }
 
     private func approvalRecord(runID: UUID, toolName: String, context: ModelContext) throws -> ApprovalRequestRecord? {
-        let descriptor = FetchDescriptor<ApprovalRequestRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-        return try context.fetch(descriptor).first { $0.runID == runID && $0.actionName == toolName }
+        let descriptor = FetchDescriptor<ApprovalRequestRecord>(
+            predicate: #Predicate { record in
+                record.runID == runID && record.actionName == toolName
+            },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        return try context.fetch(descriptor).first
     }
 
-    private func approvalReason(tool: any Tool, goal: String, autonomyLevel: AutonomyLevel) -> String {
-        let metadata = tool.metadata(for: goal)
+    private func markApprovalExpired(_ approval: ApprovalRequestRecord, context: ModelContext) throws {
+        approval.approved = false
+        approval.resolvedAt = .now
+        try context.safeSave()
+        Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
+    }
+
+    private func approvalReason(tool: any Tool, goal: String, autonomyLevel: AutonomyLevel, metadata: ToolExecutionMetadata? = nil) -> String {
+        let metadata = metadata ?? tool.metadata(for: goal)
         var details = ["\(tool.name) is \(tool.riskLevel.rawValue) risk or current autonomy is \(autonomyLevel.label)."]
-        if let action = metadata.actionPreview, !action.isEmpty {
-            details.append("Action: \(action).")
-        }
-        if let target = metadata.targetPreview, !target.isEmpty {
-            details.append("Target: \(target).")
-        }
-        if metadata.requiresNetwork {
-            details.append("Requires network access.")
-        }
+        if let action = metadata.actionPreview, !action.isEmpty { details.append("Action: \(action).") }
+        if let target = metadata.targetPreview, !target.isEmpty { details.append("Target: \(target).") }
+        if metadata.requiresNetwork { details.append("Requires network access.") }
         return details.joined(separator: " ")
     }
 
+    private func approvalUserVisibleDiff(tool: any Tool, goal: String, metadata: ToolExecutionMetadata) -> String {
+        let action = metadata.actionPreview ?? "Run \(tool.name)"
+        let target = metadata.targetPreview ?? "local"
+        return "\(action). Target: \(target). Input: \(DiagnosticsRedactor.redact(goal, maxLength: 180))"
+    }
+
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
-        if let toolOutput = state.toolResults.last {
-            return UserFacingResponseSanitizer.sanitize(toolOutput)
-        }
+        if let toolOutput = state.toolResults.last { return UserFacingResponseSanitizer.sanitize(toolOutput) }
         let request = LLMRequest(prompt: contextPackage.prompt, conversationContext: [goal], retrievedContext: state.retrievedContext)
         let response = try await provider.complete(request: request)
         return UserFacingResponseSanitizer.sanitize(response.text)
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {
-        if let toolOutput = state.toolResults.last, !toolOutput.isEmpty {
-            return "From goal '\(goal)': \(toolOutput)"
-        }
+        if let toolOutput = state.toolResults.last, !toolOutput.isEmpty { return "From goal '\(goal)': \(toolOutput)" }
         return "From goal '\(goal)': \(state.finalResponse)"
     }
 
     private func requiresApproval(tool: any Tool, autonomyLevel: AutonomyLevel) -> Bool {
-        if tool.riskLevel == .destructive || tool.riskLevel == .high {
-            return true
-        }
-        switch autonomyLevel {
-        case .manual:
-            return tool.requiresApproval
-        case .assisted:
-            return tool.riskLevel == .medium
-        case .semiAuto, .auto:
-            return false
-        }
+        ToolApprovalPolicy.requiresApproval(tool: tool, autonomyLevel: autonomyLevel)
     }
 
-    private func finishFailure(
-        _ status: AgentRunStatus,
-        state: AgentLoopState,
-        runRecord: AgentRunRecord,
-        context: ModelContext,
-        continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation
-    ) {
+    private func finishFailure(_ status: AgentRunStatus, state: AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) {
         runRecord.statusRawValue = status.rawValue
         runRecord.lastError = error(for: status).localizedDescription
-        if status == .paused {
-            runRecord.completedAt = nil
-        } else {
-            runRecord.completedAt = .now
-        }
+        runRecord.completedAt = status == .paused ? nil : .now
         runRecord.updatedAt = .now
         try? recordCheckpoint(state: state, nodeID: status.rawValue, context: context, includeStateData: true)
         try? telemetryBuffer.flush(runID: state.runID, to: context)
@@ -780,27 +598,16 @@ struct AgentLoop: Sendable {
 
     private func error(for status: AgentRunStatus) -> AgentRuntimeError {
         switch status {
-        case .paused:
-            return .paused
-        case .timedOut:
-            return .timedOut
-        case .maxStepsReached:
-            return .maxStepsReached
-        default:
-            return .cancelled
+        case .paused: return .paused
+        case .timedOut: return .timedOut
+        case .maxStepsReached: return .maxStepsReached
+        default: return .cancelled
         }
     }
 }
 
 enum UserFacingResponseSanitizer {
-    private static let internalHeadings = [
-        "Assistant Reflection",
-        "Final Decision",
-        "Output Formatting",
-        "Local Context",
-        "Action",
-        "Conclusion"
-    ]
+    private static let internalHeadings = ["Assistant Reflection", "Final Decision", "Output Formatting", "Local Context", "Action", "Conclusion"]
 
     static func sanitize(_ text: String) -> String {
         var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -812,7 +619,6 @@ enum UserFacingResponseSanitizer {
             .replacingOccurrences(of: #"(?m)^\s*Reflection:\s*.*$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-
         if cleaned.localizedCaseInsensitiveContains("reflect phase") || cleaned.localizedCaseInsensitiveContains("output formatting valid") {
             return "I could not produce a useful local answer for that request."
         }
@@ -832,16 +638,8 @@ enum UserFacingResponseSanitizer {
         var cleaned = text
         for heading in internalHeadings {
             let escaped = NSRegularExpression.escapedPattern(for: heading)
-            cleaned = cleaned.replacingOccurrences(
-                of: #"(?is)\n?\s*\*\*\#(escaped):\*\*.*?(?=\n\s*\*\*[^*]+:\*\*|\z)"#,
-                with: "",
-                options: .regularExpression
-            )
-            cleaned = cleaned.replacingOccurrences(
-                of: #"(?is)\n?\s*\#(escaped):.*?(?=\n\s*[^:\n]{2,60}:|\z)"#,
-                with: "",
-                options: .regularExpression
-            )
+            cleaned = cleaned.replacingOccurrences(of: #"(?is)\n?\s*\*\*\#(escaped):\*\*.*?(?=\n\s*\*\*[^*]+:\*\*|\z)"#, with: "", options: .regularExpression)
+            cleaned = cleaned.replacingOccurrences(of: #"(?is)\n?\s*\#(escaped):.*?(?=\n\s*[^:\n]{2,60}:|\z)"#, with: "", options: .regularExpression)
         }
         return cleaned
     }
@@ -856,15 +654,7 @@ final class AgentRuntime {
     private var runningTasks: [UUID: Task<Void, Never>] = [:]
 
     init(planner: AgentPlanner, executor: AgentExecutor, observer: AgentObserver, reflector: AgentReflector, contextBuilder: ContextBuilder) {
-        loop = AgentLoop(
-            planner: planner,
-            executor: executor,
-            observer: observer,
-            reflector: reflector,
-            contextBuilder: contextBuilder,
-            approvalGate: approvalGate,
-            telemetryBuffer: telemetryBuffer
-        )
+        loop = AgentLoop(planner: planner, executor: executor, observer: observer, reflector: reflector, contextBuilder: contextBuilder, approvalGate: approvalGate, telemetryBuffer: telemetryBuffer)
     }
 
     func run(goal: String, conversationID: UUID?, messages: [String], provider: any LLMProvider, options: AgentRuntimeOptions, context: ModelContext) -> AsyncThrowingStream<AgentRuntimeEvent, Error> {
@@ -872,9 +662,7 @@ final class AgentRuntime {
         return AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
                 do {
-                    for try await event in loop.run(runID: runID, goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context) {
-                        continuation.yield(event)
-                    }
+                    for try await event in loop.run(runID: runID, goal: goal, conversationID: conversationID, messages: messages, provider: provider, options: options, context: context) { continuation.yield(event) }
                     runningTasks[runID] = nil
                     continuation.finish()
                 } catch {
@@ -883,12 +671,7 @@ final class AgentRuntime {
                 }
             }
             runningTasks[runID] = task
-            continuation.onTermination = { @Sendable _ in
-                Task { @MainActor in
-                    self.runningTasks[runID]?.cancel()
-                    self.runningTasks[runID] = nil
-                }
-            }
+            continuation.onTermination = { @Sendable _ in Task { @MainActor in self.runningTasks[runID]?.cancel(); self.runningTasks[runID] = nil } }
         }
     }
 
@@ -897,9 +680,7 @@ final class AgentRuntime {
             let runID = run.id
             let task = Task { @MainActor in
                 do {
-                    for try await event in loop.resume(run: run, provider: provider, options: options, context: context) {
-                        continuation.yield(event)
-                    }
+                    for try await event in loop.resume(run: run, provider: provider, options: options, context: context) { continuation.yield(event) }
                     runningTasks[runID] = nil
                     continuation.finish()
                 } catch {
@@ -908,12 +689,7 @@ final class AgentRuntime {
                 }
             }
             runningTasks[runID] = task
-            continuation.onTermination = { @Sendable _ in
-                Task { @MainActor in
-                    self.runningTasks[runID]?.cancel()
-                    self.runningTasks[runID] = nil
-                }
-            }
+            continuation.onTermination = { @Sendable _ in Task { @MainActor in self.runningTasks[runID]?.cancel(); self.runningTasks[runID] = nil } }
         }
     }
 
@@ -922,17 +698,8 @@ final class AgentRuntime {
         run.statusRawValue = AgentRunStatus.paused.rawValue
         run.requiresApproval = false
         run.updatedAt = .now
-        context.insert(AgentTraceRecord(
-            runID: run.id,
-            stepIndex: run.currentStep,
-            phase: run.currentPhase,
-            message: "Run paused by user."
-        ))
-        context.insert(AgentCheckpointRecord(
-            runID: run.id,
-            nodeID: AgentRunStatus.paused.rawValue,
-            stateSummary: "Paused at \(run.currentPhase) step \(run.currentStep)."
-        ))
+        context.insert(AgentTraceRecord(runID: run.id, stepIndex: run.currentStep, phase: run.currentPhase, message: "Run paused by user."))
+        context.insert(AgentCheckpointRecord(runID: run.id, nodeID: AgentRunStatus.paused.rawValue, stateSummary: "Paused at \(run.currentPhase) step \(run.currentStep)."))
         try context.safeSave()
     }
 
@@ -946,27 +713,28 @@ final class AgentRuntime {
         run.completedAt = .now
         run.updatedAt = .now
         Task { await approvalGate.cancel(runID: run.id) }
-        let pendingApprovals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { $0.runID == run.id && $0.approved == nil }
+        let descriptor = FetchDescriptor<ApprovalRequestRecord>(predicate: #Predicate { approval in
+            approval.runID == run.id && approval.approved == nil
+        })
+        let pendingApprovals = try context.fetch(descriptor)
         for approval in pendingApprovals {
             approval.approved = false
             approval.resolvedAt = .now
             Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
         }
-        context.insert(AgentTraceRecord(
-            runID: run.id,
-            stepIndex: run.currentStep,
-            phase: run.currentPhase,
-            message: "Run cancelled by user."
-        ))
-        context.insert(AgentCheckpointRecord(
-            runID: run.id,
-            nodeID: AgentRunStatus.cancelled.rawValue,
-            stateSummary: "Cancelled at \(run.currentPhase) step \(run.currentStep)."
-        ))
+        context.insert(AgentTraceRecord(runID: run.id, stepIndex: run.currentStep, phase: run.currentPhase, message: "Run cancelled by user."))
+        context.insert(AgentCheckpointRecord(runID: run.id, nodeID: AgentRunStatus.cancelled.rawValue, stateSummary: "Cancelled at \(run.currentPhase) step \(run.currentStep)."))
         try context.safeSave()
     }
 
     func approve(_ approval: ApprovalRequestRecord, context: ModelContext) throws {
+        guard !approval.isExpired() else {
+            approval.approved = false
+            approval.resolvedAt = .now
+            try context.safeSave()
+            Task { await approvalGate.resolve(approvalID: approval.id, approved: false) }
+            throw AgentRuntimeError.approvalExpired(approval.toolName)
+        }
         approval.approved = true
         approval.resolvedAt = .now
         try context.safeSave()
@@ -981,16 +749,18 @@ final class AgentRuntime {
     }
 
     func approve(approvalID: UUID, context: ModelContext) throws {
-        guard let approval = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first(where: { $0.id == approvalID }) else {
-            throw AgentRuntimeError.approvalNotFound
-        }
+        let descriptor = FetchDescriptor<ApprovalRequestRecord>(predicate: #Predicate { approval in
+            approval.id == approvalID
+        })
+        guard let approval = try context.fetch(descriptor).first else { throw AgentRuntimeError.approvalNotFound }
         try approve(approval, context: context)
     }
 
     func reject(approvalID: UUID, context: ModelContext) throws {
-        guard let approval = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first(where: { $0.id == approvalID }) else {
-            throw AgentRuntimeError.approvalNotFound
-        }
+        let descriptor = FetchDescriptor<ApprovalRequestRecord>(predicate: #Predicate { approval in
+            approval.id == approvalID
+        })
+        guard let approval = try context.fetch(descriptor).first else { throw AgentRuntimeError.approvalNotFound }
         try reject(approval, context: context)
     }
 }
