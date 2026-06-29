@@ -175,6 +175,33 @@ struct RepoSelfModelSnapshot: Sendable, Equatable {
 }
 
 struct RepoSymbolGraphBuilder: Sendable {
+    private enum ScopeKind {
+        case type
+        case nonType
+    }
+
+    private struct ScopeFrame {
+        var kind: ScopeKind
+        var name: String?
+        var endLine: Int
+    }
+
+    private struct DeclarationInfo {
+        var accessModifier: String?
+        var kind: RepoSymbolKind
+        var name: String
+    }
+
+    private static let declarationRegex: NSRegularExpression = {
+        let pattern = #"^\s*((?:(?:@\w+(?:\([^)]*\))?|open|public|package|internal|fileprivate|private(?:\([^)]*\))?|static|final|class|mutating|nonmutating|override|required|convenience|lazy|weak|unowned|indirect|distributed|isolated|nonisolated)\s+)*)\b(actor|class|struct|enum|protocol|extension|func|var|let)\s+([A-Za-z_][A-Za-z0-9_\.]*)"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
+    private static let accessModifierRegex: NSRegularExpression = {
+        let pattern = #"\b(open|public|package|internal|fileprivate|private)(?:\([^)]*\))?\b"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
     func build(files: [RepoSourceFile], repositoryName: String, commitHash: String, generatedAt: Date = .now) -> RepoSymbolGraphSnapshot {
         let symbols = files.flatMap { file in
             parse(file: file, repositoryName: repositoryName, commitHash: commitHash)
@@ -191,19 +218,21 @@ struct RepoSymbolGraphBuilder: Sendable {
         let lines = file.content.components(separatedBy: .newlines)
         let moduleName = moduleName(for: file.path)
         var nodes: [RepoSymbolNode] = []
-        var typeScopes: [RepoSymbolNode] = []
+        var scopes: [ScopeFrame] = []
 
         for index in lines.indices {
             let lineNumber = index + 1
             let line = lines[index]
-            while let last = typeScopes.last, last.lineEnd < lineNumber {
-                typeScopes.removeLast()
+            while let last = scopes.last, last.endLine < lineNumber {
+                scopes.removeLast()
             }
             guard let parsed = Self.parseDeclaration(line) else { continue }
+            guard !scopes.contains(where: { $0.kind == .nonType }) else { continue }
+
             let kind = parsed.kind
             let lineEnd = endLine(startingAt: index, in: lines)
-            let privacy = privacyLevel(modifier: parsed.modifier, defaultPrivacy: file.privacyLevel)
-            let parent = typeScopes.last?.name
+            let privacy = privacyLevel(accessModifier: parsed.accessModifier, defaultPrivacy: file.privacyLevel)
+            let parent = scopes.last(where: { $0.kind == .type })?.name
             let signature = line.trimmingCharacters(in: .whitespacesAndNewlines)
             let symbolID = [commitHash, file.path, "L\(lineNumber)", parsed.name, kind.rawValue].joined(separator: ":")
             let node = RepoSymbolNode(
@@ -223,7 +252,9 @@ struct RepoSymbolGraphBuilder: Sendable {
             nodes.append(node)
 
             if kind.isTypeScope {
-                typeScopes.append(node)
+                scopes.append(ScopeFrame(kind: .type, name: parsed.name, endLine: lineEnd))
+            } else if kind == .function || kind == .property && lineEnd > lineNumber && line.contains("{") {
+                scopes.append(ScopeFrame(kind: .nonType, name: parsed.name, endLine: lineEnd))
             }
         }
 
@@ -248,23 +279,31 @@ struct RepoSymbolGraphBuilder: Sendable {
         return nodes
     }
 
-    private static func parseDeclaration(_ line: String) -> (modifier: String?, kind: RepoSymbolKind, name: String)? {
+    private static func parseDeclaration(_ line: String) -> DeclarationInfo? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.hasPrefix("//"), !trimmed.hasPrefix("*") else { return nil }
-        let pattern = #"\b(open|public|internal|fileprivate|private)?\s*(actor|class|struct|enum|protocol|extension|func|var|let)\s+([A-Za-z_][A-Za-z0-9_\.]*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        guard let match = regex.firstMatch(in: trimmed, range: range), match.numberOfRanges >= 4,
+        guard let match = declarationRegex.firstMatch(in: trimmed, range: range), match.numberOfRanges >= 4,
               let kindRange = Range(match.range(at: 2), in: trimmed),
               let nameRange = Range(match.range(at: 3), in: trimmed) else {
             return nil
         }
-        let modifier = Range(match.range(at: 1), in: trimmed).map { String(trimmed[$0]) }
+        let modifiers = Range(match.range(at: 1), in: trimmed).map { String(trimmed[$0]) } ?? ""
+        let accessModifier = accessModifier(in: modifiers)
         let rawKind = String(trimmed[kindRange])
         let kind = RepoSymbolKind(swiftKeyword: rawKind)
         let rawName = String(trimmed[nameRange])
         let name = rawName.split(separator: "(").first.map(String.init) ?? rawName
-        return (modifier, kind, name)
+        return DeclarationInfo(accessModifier: accessModifier, kind: kind, name: name)
+    }
+
+    private static func accessModifier(in modifiers: String) -> String? {
+        let range = NSRange(modifiers.startIndex..<modifiers.endIndex, in: modifiers)
+        guard let match = accessModifierRegex.firstMatch(in: modifiers, range: range),
+              let modifierRange = Range(match.range(at: 1), in: modifiers) else {
+            return nil
+        }
+        return String(modifiers[modifierRange])
     }
 
     private func endLine(startingAt index: Int, in lines: [String]) -> Int {
@@ -294,11 +333,11 @@ struct RepoSymbolGraphBuilder: Sendable {
         return parts.first?.replacingOccurrences(of: ".swift", with: "") ?? "root"
     }
 
-    private func privacyLevel(modifier: String?, defaultPrivacy: RepoPrivacyLevel) -> RepoPrivacyLevel {
-        switch modifier {
+    private func privacyLevel(accessModifier: String?, defaultPrivacy: RepoPrivacyLevel) -> RepoPrivacyLevel {
+        switch accessModifier {
         case "open", "public": .publicAPI
         case "private", "fileprivate": .private
-        case "internal": .internal
+        case "internal", "package": .internal
         default: defaultPrivacy
         }
     }
@@ -314,15 +353,11 @@ struct RepoSelfModelService: Sendable {
     @discardableResult
     func rebuildIndex(files: [RepoSourceFile], repositoryName: String, commitHash: String, rootPath: String = "", context: ModelContext) throws -> RepoIndexRecord {
         let snapshot = builder.build(files: files, repositoryName: repositoryName, commitHash: commitHash)
-        let staleSymbols = try context.fetch(FetchDescriptor<RepoSymbolRecord>()).filter { record in
-            record.repositoryName == repositoryName && record.commitHash == commitHash
-        }
+        let staleSymbols = try symbolsDescriptor(repositoryName: repositoryName).fetch(from: context)
         for record in staleSymbols {
             context.delete(record)
         }
-        let staleIndexes = try context.fetch(FetchDescriptor<RepoIndexRecord>()).filter { record in
-            record.repositoryName == repositoryName && record.commitHash == commitHash
-        }
+        let staleIndexes = try indexesDescriptor(repositoryName: repositoryName).fetch(from: context)
         for record in staleIndexes {
             context.delete(record)
         }
@@ -335,7 +370,7 @@ struct RepoSelfModelService: Sendable {
             commitHash: commitHash,
             rootPath: rootPath,
             symbolCount: snapshot.symbols.count,
-            privacyLevelRawValue: snapshot.symbols.map(\.privacyLevel.rawValue).contains(RepoPrivacyLevel.private.rawValue) ? RepoPrivacyLevel.private.rawValue : RepoPrivacyLevel.internal.rawValue,
+            privacyLevelRawValue: aggregatePrivacy(for: snapshot.symbols).rawValue,
             generatedAt: snapshot.generatedAt
         )
         context.insert(index)
@@ -343,14 +378,15 @@ struct RepoSelfModelService: Sendable {
         return index
     }
 
-    func symbols(matching query: String, limit: Int = 10, context: ModelContext) throws -> [RepoSymbolRecord] {
+    func symbols(matching query: String, limit: Int = 10, repositoryName: String? = nil, commitHash: String? = nil, context: ModelContext) throws -> [RepoSymbolRecord] {
         let terms = query.lowercased()
             .split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return [] }
+        guard let scope = try activeScope(repositoryName: repositoryName, commitHash: commitHash, context: context) else { return [] }
 
-        let records = try context.fetch(FetchDescriptor<RepoSymbolRecord>())
+        let records = try symbolsDescriptor(repositoryName: scope.repositoryName, commitHash: scope.commitHash).fetch(from: context)
         return records
             .map { record in (record, score(record: record, terms: terms)) }
             .filter { $0.1 > 0 }
@@ -365,11 +401,8 @@ struct RepoSelfModelService: Sendable {
     }
 
     func latestSnapshot(context: ModelContext) throws -> RepoSelfModelSnapshot? {
-        let indexes = try context.fetch(FetchDescriptor<RepoIndexRecord>(sortBy: [SortDescriptor(\.generatedAt, order: .reverse)]))
-        guard let index = indexes.first else { return nil }
-        let symbols = try context.fetch(FetchDescriptor<RepoSymbolRecord>()).filter { symbol in
-            symbol.repositoryName == index.repositoryName && symbol.commitHash == index.commitHash
-        }
+        guard let index = try latestIndex(context: context) else { return nil }
+        let symbols = try symbolsDescriptor(repositoryName: index.repositoryName, commitHash: index.commitHash).fetch(from: context)
         let modules = Set(symbols.map(\.moduleName)).sorted()
         let capabilities = symbols
             .filter { $0.kind == .function || $0.kind == .struct || $0.kind == .class || $0.kind == .actor }
@@ -383,6 +416,81 @@ struct RepoSelfModelService: Sendable {
             modules: modules,
             capabilities: Array(capabilities.prefix(50))
         )
+    }
+
+    private func latestIndex(repositoryName: String? = nil, commitHash: String? = nil, context: ModelContext) throws -> RepoIndexRecord? {
+        let descriptor: FetchDescriptor<RepoIndexRecord>
+        if let repositoryName, let commitHash {
+            descriptor = indexesDescriptor(repositoryName: repositoryName, commitHash: commitHash, limit: 1)
+        } else if let repositoryName {
+            descriptor = indexesDescriptor(repositoryName: repositoryName, limit: 1)
+        } else if let commitHash {
+            descriptor = indexesDescriptor(commitHash: commitHash, limit: 1)
+        } else {
+            descriptor = indexesDescriptor(limit: 1)
+        }
+        return try context.fetch(descriptor).first
+    }
+
+    private func activeScope(repositoryName: String?, commitHash: String?, context: ModelContext) throws -> (repositoryName: String, commitHash: String)? {
+        if let repositoryName, let commitHash {
+            return (repositoryName, commitHash)
+        }
+        guard let index = try latestIndex(repositoryName: repositoryName, commitHash: commitHash, context: context) else {
+            return nil
+        }
+        return (index.repositoryName, index.commitHash)
+    }
+
+    private func symbolsDescriptor(repositoryName: String, commitHash: String? = nil) -> FetchDescriptor<RepoSymbolRecord> {
+        if let commitHash {
+            return FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+                record.repositoryName == repositoryName && record.commitHash == commitHash
+            })
+        }
+        return FetchDescriptor<RepoSymbolRecord>(predicate: #Predicate { record in
+            record.repositoryName == repositoryName
+        })
+    }
+
+    private func indexesDescriptor(repositoryName: String? = nil, commitHash: String? = nil, limit: Int? = nil) -> FetchDescriptor<RepoIndexRecord> {
+        var descriptor: FetchDescriptor<RepoIndexRecord>
+        if let repositoryName, let commitHash {
+            descriptor = FetchDescriptor<RepoIndexRecord>(
+                predicate: #Predicate { record in
+                    record.repositoryName == repositoryName && record.commitHash == commitHash
+                },
+                sortBy: [SortDescriptor(\.generatedAt, order: .reverse)]
+            )
+        } else if let repositoryName {
+            descriptor = FetchDescriptor<RepoIndexRecord>(
+                predicate: #Predicate { record in
+                    record.repositoryName == repositoryName
+                },
+                sortBy: [SortDescriptor(\.generatedAt, order: .reverse)]
+            )
+        } else if let commitHash {
+            descriptor = FetchDescriptor<RepoIndexRecord>(
+                predicate: #Predicate { record in
+                    record.commitHash == commitHash
+                },
+                sortBy: [SortDescriptor(\.generatedAt, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor<RepoIndexRecord>(sortBy: [SortDescriptor(\.generatedAt, order: .reverse)])
+        }
+        if let limit {
+            descriptor.fetchLimit = limit
+        }
+        return descriptor
+    }
+
+    private func aggregatePrivacy(for symbols: [RepoSymbolNode]) -> RepoPrivacyLevel {
+        let levels = Set(symbols.map(\.privacyLevel))
+        if levels.contains(.private) { return .private }
+        if levels.contains(.internal) { return .internal }
+        if levels.contains(.publicAPI) { return .publicAPI }
+        return .internal
     }
 
     private func score(record: RepoSymbolRecord, terms: [String]) -> Double {
@@ -404,6 +512,12 @@ struct RepoSelfModelService: Sendable {
         }
         if record.kind == .module { score *= 0.7 }
         return score
+    }
+}
+
+private extension FetchDescriptor {
+    func fetch(from context: ModelContext) throws -> [T] {
+        try context.fetch(self)
     }
 }
 
