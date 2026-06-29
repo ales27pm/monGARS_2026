@@ -92,7 +92,7 @@ enum ApprovalTupleHasher {
     static func normalizedJSON(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "{}" }
-        return normalizedJSONObject(from: trimmed).mapToCanonicalJSONString(fallback: trimmed)
+        return canonicalJSONString(normalizedJSONObject(from: trimmed), fallback: trimmed)
     }
 
     static func normalizedArguments(toolName: String, input: String, target: String?) -> String {
@@ -104,7 +104,19 @@ enum ApprovalTupleHasher {
     }
 
     static func canonicalJSONString(_ dictionary: [String: Any]) -> String {
-        canonicalObject(dictionary).mapToCanonicalJSONString(fallback: "{}")
+        canonicalJSONString(canonicalObject(dictionary), fallback: "{}")
+    }
+
+    private static func canonicalJSONString(_ object: Any, fallback: String) -> String {
+        if JSONSerialization.isValidJSONObject(object),
+           let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        if let string = object as? String {
+            return string
+        }
+        return fallback
     }
 
     private static func normalizedJSONObject(from text: String) -> Any {
@@ -149,19 +161,5 @@ enum ApprovalTupleHasher {
             }
         }
         return escaped
-    }
-}
-
-private extension Any {
-    func mapToCanonicalJSONString(fallback: String) -> String {
-        if JSONSerialization.isValidJSONObject(self),
-           let data = try? JSONSerialization.data(withJSONObject: self, options: [.sortedKeys]),
-           let text = String(data: data, encoding: .utf8) {
-            return text
-        }
-        if let string = self as? String {
-            return string
-        }
-        return fallback
     }
 }
