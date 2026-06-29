@@ -22,11 +22,14 @@ struct FoundationModelProvider: LLMProvider {
 #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, *) {
             let session = LanguageModelSession()
-            let context = request.retrievedContext.isEmpty ? "" : "\n\nLocal context:\n\(request.retrievedContext.joined(separator: "\n\n"))"
-            let response = try await session.respond(to: request.prompt + context)
+            let response = try await session.respond(to: Self.assembledPrompt(for: request))
             return LLMResponse(text: response.content, providerName: name)
         }
 #endif
         throw LLMProviderError.unavailable("FoundationModels is unavailable on this runtime. Use a supported on-device runtime or configure an approved remote provider.")
+    }
+
+    static func assembledPrompt(for request: LLMRequest) -> String {
+        LLMPromptAssembler.assemble(request: request)
     }
 }

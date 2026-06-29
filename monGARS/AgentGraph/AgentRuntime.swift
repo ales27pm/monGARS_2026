@@ -503,7 +503,7 @@ struct AgentLoop: Sendable {
             try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) { reflectionMessage }
         }
 
-        contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .reflect, budget: provider.capabilities.maxContextTokens)
+        contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .respond, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
             if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
             let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
@@ -674,9 +674,15 @@ struct AgentLoop: Sendable {
 
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
         if let toolOutput = state.toolResults.last { return UserFacingResponseSanitizer.sanitize(toolOutput) }
-        let request = LLMRequest(prompt: contextPackage.prompt, conversationContext: [goal], retrievedContext: state.retrievedContext)
+        let request = LLMRequest(
+            prompt: contextPackage.prompt,
+            conversationContext: [],
+            retrievedContext: [],
+            segments: contextPackage.segments,
+            isPromptPreassembled: true
+        )
         let response = try await provider.complete(request: request)
-        return UserFacingResponseSanitizer.sanitize(response.text)
+        return try UserFacingResponseSanitizer.sanitizeModelResponse(response.text)
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {
@@ -743,6 +749,20 @@ enum UserFacingResponseSanitizer {
         return cleaned.isEmpty ? invalidResponseMessage : cleaned
     }
 
+    static func sanitizeModelResponse(_ text: String) throws -> String {
+        guard !containsInternalPromptEcho(text) else {
+            throw LLMProviderError.unavailable(invalidResponseMessage)
+        }
+        let cleaned = sanitize(text)
+        guard cleaned != invalidResponseMessage else {
+            throw LLMProviderError.unavailable(invalidResponseMessage)
+        }
+        guard !containsInternalPromptEcho(cleaned) else {
+            throw LLMProviderError.unavailable(invalidResponseMessage)
+        }
+        return cleaned
+    }
+
     private static func containsInvalidAssistantBoilerplate(_ text: String) -> Bool {
         let lower = text.lowercased()
         return lower.contains("reflect phase")
@@ -752,6 +772,16 @@ enum UserFacingResponseSanitizer {
             || lower.contains("created by apple")
             || lower.contains("privacy-first guidelines")
             || lower.contains("ethical guidelines")
+    }
+
+    private static func containsInternalPromptEcho(_ text: String) -> Bool {
+        let patterns = [
+            #"(?im)^\s*(current phase|graph state|final answer contract|system rules|tool results)\s*:"#,
+            #"(?im)^\s*\*\*(assistant reflection|final decision|output formatting)\s*:\*\*"#,
+            #"(?im)^\s*(assistant reflection|final decision|output formatting)\s*:"#,
+            #"(?im)^\s*(begin|end) untrusted\b"#
+        ]
+        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }
 
     private static func extractAssistantResponse(from text: String) -> String {

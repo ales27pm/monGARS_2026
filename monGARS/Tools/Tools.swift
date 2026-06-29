@@ -680,11 +680,15 @@ struct WeatherTool: Tool {
             "forecast for",
             "weather",
             "forecast",
+            "right now",
+            "currently",
             "tomorrow",
             "today",
-            "current"
+            "current",
+            "now"
         ].sorted(by: { $0.count > $1.count }) {
-            cleaned = cleaned.replacingOccurrences(of: phrase, with: "", options: [.caseInsensitive, .diacriticInsensitive])
+            let pattern = #"(?i)(?<![\p{L}\p{N}])"# + NSRegularExpression.escapedPattern(for: phrase) + #"(?![\p{L}\p{N}])"#
+            cleaned = cleaned.replacingOccurrences(of: pattern, with: "", options: [.regularExpression, .diacriticInsensitive])
         }
         return cleaned
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1000,6 +1004,38 @@ struct MapsTool: Tool {
             return .needsInput(toolName: name, output: "Provide a place, address, or directions destination for Maps.", riskLevel: riskLevel, requiresApproval: true)
         }
 
+        if Self.isCurrentLocationMapRequest(query) {
+            #if canImport(CoreLocation)
+            do {
+                let location = try await currentDeviceLocation()
+                let coordinate = location.coordinate
+                let mapsURL = Self.appleMapsURL(query: "Current Location", coordinate: coordinate)
+                return ToolResult(
+                    toolName: name,
+                    output: "Prepared approved Apple Maps handoff for current location: \(mapsURL.absoluteString)",
+                    outcome: .handoffPrepared,
+                    riskLevel: riskLevel,
+                    requiresApproval: true,
+                    approved: true,
+                    target: "maps.apple.com",
+                    statusCode: 200
+                )
+            } catch {
+                let message = userVisibleToolError(error, defaultMessage: "Current location failed.")
+                return ToolResult(
+                    toolName: name,
+                    output: "Current-location Maps handoff failed: \(message)",
+                    outcome: .permissionDenied,
+                    riskLevel: riskLevel,
+                    requiresApproval: true,
+                    approved: true,
+                    target: "CoreLocation",
+                    errorCategory: "permission_or_location_unavailable"
+                )
+            }
+            #endif
+        }
+
         #if canImport(MapKit)
         let started = ContinuousClock.now
         let searchRequest = MKLocalSearch.Request()
@@ -1055,6 +1091,16 @@ struct MapsTool: Tool {
         let mapsURL = Self.appleMapsURL(query: query, coordinate: nil)
         return ToolResult(toolName: name, output: "MapKit is unavailable on this platform. Prepared approved Apple Maps search handoff: \(mapsURL.absoluteString)", outcome: .unavailable, riskLevel: riskLevel, requiresApproval: true, approved: true, target: "maps.apple.com", errorCategory: "platform_unavailable")
         #endif
+    }
+
+    static func isCurrentLocationMapRequest(_ input: String) -> Bool {
+        let intent = normalizedIntent(input)
+        return intent == "where am i"
+            || intent == "where i am"
+            || intent == "current location"
+            || intent == "my location"
+            || intent == "locate me"
+            || intent == "show me where i am"
     }
 
     private static func appleMapsURL(query: String, coordinate: CLLocationCoordinate2D?) -> URL {

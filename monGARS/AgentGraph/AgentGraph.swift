@@ -112,6 +112,28 @@ struct AgentGraph: Sendable {
         return state
     }
 
+    private static func responseSegments(for state: AgentState) -> [LLMPromptSegment] {
+        [
+            LLMPromptSegment(title: "Current phase", body: "respond", trustLevel: .trustedInstruction),
+            LLMPromptSegment(title: "System rules", body: PromptContract.responseSystemRules, trustLevel: .trustedInstruction),
+            LLMPromptSegment(title: "USER GOAL", body: state.userInput, trustLevel: .untrustedData),
+            LLMPromptSegment(title: "CONVERSATION CONTEXT", body: state.messages.joined(separator: "\n\n"), trustLevel: .untrustedData),
+            LLMPromptSegment(title: "RETRIEVED CONTEXT", body: state.retrievedContext.joined(separator: "\n\n"), trustLevel: .untrustedData),
+            LLMPromptSegment(title: "Final answer contract", body: PromptContract.finalAnswer, trustLevel: .trustedInstruction)
+        ]
+    }
+
+    private static func responseRequest(for state: AgentState) -> LLMRequest {
+        let segments = responseSegments(for: state)
+        return LLMRequest(
+            prompt: LLMPromptAssembler.assemble(segments: segments),
+            conversationContext: [],
+            retrievedContext: [],
+            segments: segments,
+            isPromptPreassembled: true
+        )
+    }
+
     static func makeDefault(toolRouter: ToolRouter) -> AgentGraph {
         let route = AgentNode(id: "route") { state, execution in
             var next = state
@@ -143,17 +165,20 @@ struct AgentGraph: Sendable {
             if let toolOutput = state.toolOutput {
                 next.finalResponse = UserFacingResponseSanitizer.sanitize(toolOutput)
             } else {
-                let request = LLMRequest(prompt: state.userInput, conversationContext: state.messages, retrievedContext: state.retrievedContext)
+                let request = Self.responseRequest(for: state)
                 var accumulated = ""
                 for try await chunk in execution.llmProvider.stream(request: request) {
                     accumulated += chunk
-                    await execution.event(.partialResponse(UserFacingResponseSanitizer.sanitize(accumulated)))
                 }
-                next.finalResponse = UserFacingResponseSanitizer.sanitize(accumulated)
-                if next.finalResponse.isEmpty {
+                let responseText: String
+                if accumulated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let response = try await execution.llmProvider.complete(request: request)
-                    next.finalResponse = UserFacingResponseSanitizer.sanitize(response.text)
+                    responseText = response.text
+                } else {
+                    responseText = accumulated
                 }
+                next.finalResponse = try UserFacingResponseSanitizer.sanitizeModelResponse(responseText)
+                await execution.event(.partialResponse(next.finalResponse))
             }
             return next
         }
@@ -218,9 +243,9 @@ struct AgentGraph: Sendable {
             if let toolOutput = state.toolOutput {
                 next.finalResponse = UserFacingResponseSanitizer.sanitize(toolOutput)
             } else {
-                let request = LLMRequest(prompt: state.userInput, conversationContext: state.messages, retrievedContext: state.retrievedContext)
+                let request = Self.responseRequest(for: state)
                 let response = try await execution.llmProvider.complete(request: request)
-                next.finalResponse = UserFacingResponseSanitizer.sanitize(response.text)
+                next.finalResponse = try UserFacingResponseSanitizer.sanitizeModelResponse(response.text)
             }
             return next
         }
