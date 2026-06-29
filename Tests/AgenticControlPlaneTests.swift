@@ -23,6 +23,15 @@ struct AgenticControlPlaneTests {
         #expect(decision.anchoredJustification.contains("requires_network=true"))
     }
 
+    @Test func scoredRouterUsesWholeKeywordMatches() {
+        let (container, _) = makeContext()
+
+        let decision = container.toolRouter.routeDecision(input: "contextual mapmaking notes")
+
+        #expect(decision.abstained)
+        #expect(decision.toolName == nil)
+    }
+
     @Test func scoredRouterAbstainsWhenIntentIsUnsupported() {
         let (container, _) = makeContext()
 
@@ -74,14 +83,33 @@ struct AgenticControlPlaneTests {
             sessionID: sessionID,
             userVisibleDiff: "Fetch example.com/b"
         )
+        let nilTarget = ApprovalTuple(
+            toolName: "web_fetch",
+            target: nil,
+            normalizedArgumentsJSON: #"{"url":"https://example.com/a"}"#,
+            riskLevel: .high,
+            expiresAt: first.expiresAt,
+            sessionID: sessionID,
+            userVisibleDiff: "Fetch example.com/a"
+        )
+        let emptyTarget = ApprovalTuple(
+            toolName: "web_fetch",
+            target: "",
+            normalizedArgumentsJSON: #"{"url":"https://example.com/a"}"#,
+            riskLevel: .high,
+            expiresAt: first.expiresAt,
+            sessionID: sessionID,
+            userVisibleDiff: "Fetch example.com/a"
+        )
 
         #expect(first.payloadHash == sameButReordered.payloadHash)
         #expect(first.payloadHash != changed.payloadHash)
+        #expect(nilTarget.payloadHash != emptyTarget.payloadHash)
         #expect(!first.isExpired())
         #expect(first.matches(toolName: "web_fetch", target: "example.com", normalizedArgumentsJSON: #"{"method":"GET","url":"https://example.com/a"}"#, riskLevel: .high, sessionID: sessionID))
     }
 
-    @Test func approvalRecordPersistsTupleMetadataWithBackwardsCompatibleInit() {
+    @Test func approvalRecordPersistsExpandedTupleMetadata() {
         let runID = UUID()
         let sessionID = UUID()
         let record = ApprovalRequestRecord(
@@ -104,6 +132,97 @@ struct AgenticControlPlaneTests {
         #expect(record.riskLevel == .high)
         #expect(record.payloadHash == record.approvalTuple().payloadHash)
         #expect(!record.isExpired())
+    }
+
+    @Test func approvalRecordLegacyInitializerDerivesTupleDefaults() {
+        let runID = UUID()
+        let record = ApprovalRequestRecord(
+            runID: runID,
+            actionName: "memory_delete",
+            reason: "Needs approval."
+        )
+
+        #expect(record.sessionID == runID)
+        #expect(record.toolName == "memory_delete")
+        #expect(record.target == nil)
+        #expect(record.normalizedArgumentsJSON == "{}")
+        #expect(record.riskLevel == ApprovalPolicy.defaultRiskLevel)
+        #expect(record.userVisibleDiff == "Needs approval.")
+        #expect(record.payloadHash == record.approvalTuple().payloadHash)
+    }
+
+    @Test func toolCallPayloadHashUsesExplicitSessionID() {
+        let runID = UUID()
+        let sessionID = UUID()
+        let input = "fetch https://example.com/status"
+        let record = ToolCallRecord(
+            runID: runID,
+            sessionID: sessionID,
+            toolName: "web_fetch",
+            input: input,
+            output: "ok",
+            riskLevel: ToolRiskLevel.high.rawValue,
+            requiresApproval: true,
+            approved: true,
+            target: "example.com"
+        )
+        let expected = ApprovalTupleHasher.payloadHash(
+            toolName: "web_fetch",
+            target: "example.com",
+            normalizedArgumentsJSON: ApprovalTupleHasher.normalizedArguments(toolName: "web_fetch", input: input, target: "example.com"),
+            riskLevel: ToolRiskLevel.high.rawValue,
+            sessionID: sessionID
+        )
+
+        #expect(record.sessionID == sessionID)
+        #expect(record.payloadHash == expected)
+    }
+
+    @Test func runtimeRejectsExpiredApprovalCentrally() throws {
+        let (container, context) = makeContext()
+        let approval = ApprovalRequestRecord(
+            runID: UUID(),
+            actionName: "web_fetch",
+            reason: "Expired approval.",
+            toolName: "web_fetch",
+            expiresAt: Date().addingTimeInterval(-1)
+        )
+        context.insert(approval)
+        try context.save()
+
+        do {
+            try container.agentRuntime.approve(approval, context: context)
+            #expect(Bool(false), "Expired approval should not be approved.")
+        } catch AgentRuntimeError.approvalExpired(let toolName) {
+            #expect(toolName == "web_fetch")
+        }
+
+        #expect(approval.approved == false)
+        #expect(approval.resolvedAt != nil)
+    }
+
+    @Test func runtimeCreatesDestructiveApprovalTupleForDestructiveTool() async throws {
+        let (container, context) = makeContext()
+        try container.memoryService.save(content: "Keep this memory until explicitly deleted.", context: context)
+
+        for try await event in container.agentRuntime.run(
+            goal: "forget all memories",
+            conversationID: nil,
+            messages: [],
+            provider: MockLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {
+            if case .approvalRequired = event {
+                break
+            }
+        }
+
+        let approval = try #require(try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).first)
+        #expect(approval.toolName == "memory_delete")
+        #expect(approval.riskLevel == .destructive)
+        #expect(approval.riskLevelRawValue == ToolRiskLevel.destructive.rawValue)
+        #expect(approval.normalizedArgumentsJSON.contains("forget all memories"))
     }
 
     @Test func repoSelfModelIndexesSymbolsWithLineProvenance() throws {
@@ -131,13 +250,61 @@ struct AgenticControlPlaneTests {
         )
         let matches = try container.repoSelfModelService.symbols(matching: "ToolRouter route", context: context)
         let snapshot = try #require(try container.repoSelfModelService.latestSnapshot(context: context))
+        let route = try #require(matches.first { $0.name == "route" && $0.kind == .function })
 
         #expect(index.symbolCount >= 3)
         #expect(matches.contains { $0.name == "ToolRouter" && $0.kind == .struct })
-        #expect(matches.contains { $0.name == "route" && $0.kind == .function && $0.parentName == "ToolRouter" })
-        #expect(matches.allSatisfy { $0.provenance.contains("test-sha") })
+        #expect(route.parentName == "ToolRouter")
+        #expect(route.path == "monGARS/Tools/Tools.swift")
+        #expect(route.lineStart == 6)
+        #expect(route.lineEnd == 8)
+        #expect(route.provenance == "test-sha:monGARS/Tools/Tools.swift:L6-L8")
         #expect(snapshot.repositoryName == "ales27pm/monGARS_2026")
         #expect(snapshot.modules.contains("Tools"))
+    }
+
+    @Test func repoSelfModelSearchUsesOnlyActiveIndex() throws {
+        let (container, context) = makeContext()
+        try container.repoSelfModelService.rebuildIndex(
+            files: [RepoSourceFile(path: "Old.swift", content: "struct DeletedType {}")],
+            repositoryName: "repo/app",
+            commitHash: "old-sha",
+            context: context
+        )
+        try container.repoSelfModelService.rebuildIndex(
+            files: [RepoSourceFile(path: "New.swift", content: "struct CurrentType {}")],
+            repositoryName: "repo/app",
+            commitHash: "new-sha",
+            context: context
+        )
+
+        #expect(try container.repoSelfModelService.symbols(matching: "DeletedType", context: context).isEmpty)
+        #expect(try container.repoSelfModelService.symbols(matching: "CurrentType", context: context).contains { $0.commitHash == "new-sha" })
+    }
+
+    @Test func repoSelfModelSkipsLocalDeclarationsAndReadsCompoundModifiers() throws {
+        let (container, context) = makeContext()
+        let source = RepoSourceFile(
+            path: "monGARS/Sample.swift",
+            content: """
+            public final class PublicBox {
+                public static let shared = PublicBox()
+                private static func hidden() {
+                    let localValue = 1
+                    func localHelper() {}
+                }
+            }
+            """
+        )
+
+        try container.repoSelfModelService.rebuildIndex(files: [source], repositoryName: "repo/app", commitHash: "compound-sha", context: context)
+        let publicMatches = try container.repoSelfModelService.symbols(matching: "PublicBox shared hidden", context: context)
+        let localMatches = try container.repoSelfModelService.symbols(matching: "localValue localHelper", context: context)
+
+        #expect(publicMatches.contains { $0.name == "PublicBox" && $0.privacyLevel == .publicAPI })
+        #expect(publicMatches.contains { $0.name == "shared" && $0.privacyLevel == .publicAPI })
+        #expect(publicMatches.contains { $0.name == "hidden" && $0.privacyLevel == .private })
+        #expect(localMatches.isEmpty)
     }
 
     @Test func appSchemaIncludesRepoSelfModelRecords() {
