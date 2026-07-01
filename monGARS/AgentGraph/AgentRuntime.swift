@@ -17,11 +17,56 @@ struct AgentPlanner: Sendable {
         steps.append("Reflect on whether the goal is satisfied")
         steps.append("Respond with a concise answer")
 
+        let hasExplicitDurableFact = DurableFactExtractor.memoryContent(from: goal) != nil
         return AgentPlan(
             summary: "Plan for: \(goal)",
             steps: steps,
-            shouldRemember: lower.contains("remember") || lower.contains("key point") || lower.contains("prefer")
+            shouldRemember: hasExplicitDurableFact || lower.contains("remember") || lower.contains("key point")
         )
+    }
+}
+
+enum DurableFactExtractor {
+    private static let explicitNameRegex = try? NSRegularExpression(pattern: #"(?i)\bmy\s+name\s+is\s+([^.!?,\n]+)"#)
+    private static let introductionRegex = try? NSRegularExpression(pattern: #"(?i)(?:^|[.!?]\s*|\b(?:hi|hello|hey|bonjour|salut)\b,?\s*)i(?:\s+am|'m|’m)\s+([^.!?,\n]+)"#)
+
+    static func memoryContent(from input: String) -> String? {
+        if let name = capturedValue(in: input, regex: explicitNameRegex),
+           looksLikeName(name) {
+            return "User name is \(name)"
+        }
+        if let name = capturedValue(in: input, regex: introductionRegex),
+           looksLikeName(name) {
+            return "User name is \(name)"
+        }
+        return nil
+    }
+
+    private static func capturedValue(in input: String, regex: NSRegularExpression?) -> String? {
+        guard let regex else { return nil }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        guard let match = regex.firstMatch(in: input, range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: input) else {
+            return nil
+        }
+        let value = String(input[captureRange])
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+        return value.isEmpty ? nil : value
+    }
+
+    private static func looksLikeName(_ value: String) -> Bool {
+        let words = value
+            .split(separator: " ")
+            .map { String($0).trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+        guard (1...4).contains(words.count) else { return false }
+        let rejected = Set(["fine", "good", "ok", "okay", "sorry", "here", "hungry", "tired", "busy", "working", "looking", "trying"])
+        guard !rejected.contains(words.joined(separator: " ").lowercased()) else { return false }
+        return words.allSatisfy { word in
+            guard let firstScalar = word.unicodeScalars.first else { return false }
+            return CharacterSet.uppercaseLetters.contains(firstScalar)
+        }
     }
 }
 
@@ -427,24 +472,11 @@ struct AgentLoop: Sendable {
         if needsPhase(.selectTool, state: state) {
             state.selectedToolName = tool?.name
             try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                if routeDecision.abstained, isNoToolRoute(routeDecision) {
-                    return "No tool required."
-                }
                 if routeDecision.abstained {
-                    return "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
+                    return "No tool selected. \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
                 }
                 return routeDecision.toolName.map { "Selected tool: \($0). \(routeDecision.anchoredJustification)" } ?? "No tool required."
             }
-        }
-
-        if routeDecision.abstained, !isNoToolRoute(routeDecision), needsPhase(.executeTool, state: state) {
-            let message = "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
-            state.toolResults.append(message)
-            try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { message }
-            let observation = observer.observe(toolResult: nil, retrievedContext: state.retrievedContext)
-            let observationMessage = "\(message) \(observation)"
-            state.observations.append(observationMessage)
-            try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observationMessage }
         }
 
         if let tool, needsPhase(.executeTool, state: state) {
@@ -505,6 +537,7 @@ struct AgentLoop: Sendable {
 
         contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .respond, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
+            try markPhaseStarted(.respond, state: &state, runRecord: runRecord, context: context)
             if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
             let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
             var accumulated = ""
@@ -557,6 +590,14 @@ struct AgentLoop: Sendable {
         try recordCheckpoint(state: state, nodeID: phase.rawValue, context: context, includeStateData: true)
         continuation.yield(.status(runID: state.runID, phase: phase, message: phase.statusText))
         continuation.yield(.trace(runID: state.runID, phase: phase, message: text))
+    }
+
+    private func markPhaseStarted(_ phase: AgentPhase, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext) throws {
+        state.phase = phase
+        runRecord.currentPhase = phase.rawValue
+        runRecord.updatedAt = .now
+        try recordCheckpoint(state: state, nodeID: "\(phase.rawValue)-started", context: context, includeStateData: true)
+        try context.safeSave()
     }
 
     private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext, includeStateData: Bool) throws {
@@ -686,19 +727,13 @@ struct AgentLoop: Sendable {
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {
+        if let explicitMemory = DurableFactExtractor.memoryContent(from: goal) { return explicitMemory }
         if let toolOutput = state.toolResults.last, !toolOutput.isEmpty { return "From goal '\(goal)': \(toolOutput)" }
         return "From goal '\(goal)': \(state.finalResponse)"
     }
 
     private func requiresApproval(tool: any Tool, autonomyLevel: AutonomyLevel) -> Bool {
         ToolApprovalPolicy.requiresApproval(tool: tool, autonomyLevel: autonomyLevel)
-    }
-
-    private func isNoToolRoute(_ decision: ToolRouteDecision) -> Bool {
-        decision.abstained
-            && decision.competingToolName == nil
-            && decision.competingConfidence == nil
-            && decision.anchoredJustification.localizedCaseInsensitiveContains("No registered tool matched")
     }
 
     private func finishFailure(_ status: AgentRunStatus, state: AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) {
@@ -779,7 +814,10 @@ enum UserFacingResponseSanitizer {
             #"(?im)^\s*(current phase|graph state|final answer contract|system rules|tool results)\s*:"#,
             #"(?im)^\s*\*\*(assistant reflection|final decision|output formatting)\s*:\*\*"#,
             #"(?im)^\s*(assistant reflection|final decision|output formatting)\s*:"#,
-            #"(?im)^\s*(begin|end) untrusted\b"#
+            #"(?im)^\s*(begin|end) untrusted\b"#,
+            #"(?im)^\s*</?think>\s*$"#,
+            #"(?im)^\s*<\|[^>\n]+?\|>\s*"#,
+            #"(?im)^\s*(human|assistant|system|developer)\s*:"#
         ]
         return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }

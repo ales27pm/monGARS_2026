@@ -176,6 +176,12 @@ struct MonGARSTests {
         #expect((results.first?.importance ?? 0) > 0.5)
     }
 
+    @Test func durableFactExtractorOnlyCapturesNameShapedIntroductions() {
+        #expect(DurableFactExtractor.memoryContent(from: "My name is Alexis Boulet") == "User name is Alexis Boulet")
+        #expect(DurableFactExtractor.memoryContent(from: "My name is going to the store tomorrow") == nil)
+        #expect(DurableFactExtractor.memoryContent(from: "Do you prefer tabs or spaces?") == nil)
+    }
+
     @Test func memoryEditExportAndForgetAllWork() throws {
         let (container, context) = makeContext()
         try container.memoryService.save(content: "Remember that my planning window is Friday morning.", context: context)
@@ -353,6 +359,119 @@ struct MonGARSTests {
         #expect(SettingsStore.parseHeaders("X-Test: one\nAccept: application/json") == ["X-Test": "one", "Accept": "application/json"])
         #expect(SettingsStore.parseHeaders("Authorization") == nil)
         #expect(SettingsStore.parseHeaders("X-Empty:") == nil)
+    }
+
+    @Test func settingsStorePersistsTrimmedMLXModelID() {
+        let defaults = UserDefaults.standard
+        let key = "mlxModelID"
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let store = SettingsStore()
+        store.mlxModelID = "  mlx-community/Qwen3-1.7B-4bit\n"
+
+        #expect(store.mlxModelID == "mlx-community/Qwen3-1.7B-4bit")
+        #expect(defaults.string(forKey: key) == "mlx-community/Qwen3-1.7B-4bit")
+    }
+
+    @Test func settingsStorePreservesExplicitZeroMLXTemperature() {
+        let defaults = UserDefaults.standard
+        let key = "mlxTemperature"
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        defaults.set(0.0, forKey: key)
+        let store = SettingsStore()
+
+        #expect(store.mlxTemperature == 0.0)
+    }
+
+    @Test func resetNetworkConfigurationPreservesMLXLocalPreferences() {
+        let defaults = UserDefaults.standard
+        let keys = ["mlxModelID", "mlxMaxTokens", "mlxTemperature"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        let store = SettingsStore()
+        store.mlxModelID = "mlx-community/Qwen3-1.7B-4bit"
+        store.mlxMaxTokens = 1024
+        store.mlxTemperature = 0.0
+
+        store.resetNetworkConfiguration()
+
+        #expect(store.mlxModelID == "mlx-community/Qwen3-1.7B-4bit")
+        #expect(store.mlxMaxTokens == 1024)
+        #expect(store.mlxTemperature == 0.0)
+    }
+
+    @Test func mlxProviderModeIsRealLocalProviderWithoutNetworkGate() async {
+        #expect(ProviderMode.allCases.contains(.mlx))
+        #expect(ProviderMode.mlx.label == "MLX Local")
+
+        let provider = MLXLocalProvider(modelID: "", maxTokens: 512, temperature: 0.2)
+        #expect(provider.name == "MLX Local")
+        #expect(provider.capabilities.isLocal)
+        #expect(provider.capabilities.supportsStreaming)
+        #expect(!provider.capabilities.supportsTools)
+        #expect(!provider.capabilities.supportsJSONMode)
+
+        let status = await provider.status
+        #expect(status.contains("MLX Swift LM"))
+    }
+
+    @Test func mlxModelPresetCatalogHasUsableChoices() {
+        #expect(MLXModelPreset.all.count >= 8)
+        #expect(MLXModelPreset.default.id == "mlx-community/Qwen3-0.6B-4bit")
+        #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/Llama-3.2-3B-Instruct-4bit" })
+        #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/gemma-3n-E2B-it-lm-4bit" })
+
+        let ids = MLXModelPreset.all.map(\.id)
+        #expect(Set(ids).count == ids.count)
+        #expect(ids.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+    }
+
+    @Test func mlxModelPresetLookupAcceptsTrimmedModelID() {
+        let preset = MLXModelPreset.preset(for: "  mlx-community/Qwen3-1.7B-4bit\n")
+
+        #expect(preset?.name == "Qwen3 1.7B")
+        #expect(MLXModelPreset.preset(for: "mlx-community/not-registered") == nil)
+    }
+
+    @Test func mlxProviderBlocksUncachedFirstLoadWhenNetworkIsDisabled() async throws {
+        guard MLXLocalProvider.isLinked else {
+            return
+        }
+
+        let provider = MLXLocalProvider(modelID: "mlx-community/monGARS-nonexistent-uncached-model", maxTokens: 64, temperature: 0.2, allowsModelDownload: false)
+        do {
+            _ = try await provider.complete(request: LLMRequest(prompt: "Reply ok", conversationContext: [], retrievedContext: []))
+            #expect(Bool(false), "MLX first-load must not run while network access is disabled.")
+        } catch LLMProviderError.unavailable(let reason) {
+            #expect(reason.contains("network access is off"))
+        }
     }
 
     @Test func compactNavigationSmokeTestBuildsRootSections() {
@@ -973,6 +1092,54 @@ struct MonGARSTests {
         #expect(run.statusRawValue == AgentRunStatus.maxStepsReached.rawValue)
         #expect(run.lastError == AgentRuntimeError.maxStepsReached.localizedDescription)
         #expect(run.completedAt != nil)
+    }
+
+    @Test func runtimeSavesExplicitIntroductionAndAttributesModelFailureToRespond() async throws {
+        let (container, context) = makeContext()
+
+        do {
+            for try await _ in container.agentRuntime.run(
+                goal: "Hi, I’m Alexis. How are you?",
+                conversationID: nil,
+                messages: [],
+                provider: InvalidModelEchoProvider(),
+                options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+                context: context
+            ) {}
+        } catch {
+            #expect(error.localizedDescription.contains("model response"))
+        }
+
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+        let memories = try context.fetch(FetchDescriptor<MemoryRecord>())
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+
+        #expect(run.statusRawValue == AgentRunStatus.failed.rawValue)
+        #expect(run.currentPhase == AgentPhase.respond.rawValue)
+        #expect(run.lastError?.contains("model response") == true)
+        #expect(memories.isEmpty)
+        #expect(!traces.contains { $0.phase == AgentPhase.saveMemory.rawValue })
+    }
+
+    @Test func runtimeSavesExplicitIntroductionAfterSuccessfulResponse() async throws {
+        let (container, context) = makeContext()
+
+        for try await _ in container.agentRuntime.run(
+            goal: "Hi, I’m Alexis. How are you?",
+            conversationID: nil,
+            messages: [],
+            provider: ScriptedLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {}
+
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+        let memories = try context.fetch(FetchDescriptor<MemoryRecord>())
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+
+        #expect(run.statusRawValue == AgentRunStatus.completed.rawValue)
+        #expect(memories.contains { $0.content == "User name is Alexis" })
+        #expect(traces.contains { $0.phase == AgentPhase.saveMemory.rawValue && $0.message.contains("User name is Alexis") })
     }
 
     @Test func runtimeCancelStopsActiveProviderRun() async throws {
@@ -1769,6 +1936,28 @@ struct MonGARSTests {
         let safe = try UserFacingResponseSanitizer.sanitizeModelResponse("A current phase: planning note can be discussed as plain prose.")
         #expect(safe.contains("current phase"))
     }
+
+    @Test func userFacingResponseSanitizerRejectsMLXThinkingAndChatTemplateLeak() throws {
+        let raw = """
+        <think>
+        Okay, let's see. The user wants me to return exactly "ok" as the answer.
+        </think>
+        <|endoftext|>Human: Please respond with exactly: ok
+        Assistant: system
+        """
+
+        do {
+            _ = try UserFacingResponseSanitizer.sanitizeModelResponse(raw)
+            #expect(Bool(false), "MLX reasoning and chat-template tokens must not reach users.")
+        } catch LLMProviderError.unavailable(let reason) {
+            #expect(reason.contains("model response did not contain user-visible content"))
+        }
+    }
+
+    @Test func userFacingResponseSanitizerAllowsOrdinaryRoleWordsInline() throws {
+        let safe = try UserFacingResponseSanitizer.sanitizeModelResponse("The assistant can help search for recipes after you choose a source.")
+        #expect(safe.contains("assistant can help"))
+    }
 }
 
 final class ScriptedSpeechService: SpeechService, @unchecked Sendable {
@@ -1824,6 +2013,19 @@ struct SlowLLMProvider: LLMProvider {
     func complete(request: LLMRequest) async throws -> LLMResponse {
         try await Task.sleep(nanoseconds: 5_000_000_000)
         return LLMResponse(text: "slow answer", providerName: name)
+    }
+}
+
+struct InvalidModelEchoProvider: LLMProvider {
+    let name = "Invalid Echo Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+
+    var status: String {
+        get async { "Invalid echo test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        LLMResponse(text: "Current phase: reflect\nGraph state: leaking internals", providerName: name)
     }
 }
 

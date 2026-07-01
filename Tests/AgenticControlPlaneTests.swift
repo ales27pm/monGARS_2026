@@ -42,6 +42,31 @@ struct AgenticControlPlaneTests {
         #expect(decision.abstentionReason?.contains("No registered tool") == true)
     }
 
+    @Test func runtimeFallsBackToLLMWhenToolRouteConfidenceIsLow() async throws {
+        let (container, context) = makeContext()
+        var completedResponse: String?
+
+        for try await event in container.agentRuntime.run(
+            goal: "What is Quebec net debt",
+            conversationID: nil,
+            messages: [],
+            provider: FixedLLMProvider(response: "Quebec net debt should be answered by the model or an approved web lookup, not by a routing error."),
+            options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {
+            if case .completed(_, let response) = event {
+                completedResponse = response
+            }
+        }
+
+        let response = try #require(completedResponse)
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+        #expect(response.contains("Quebec net debt should be answered"))
+        #expect(!response.contains("No safe tool selected"))
+        #expect(traces.contains { $0.phase == AgentPhase.selectTool.rawValue && $0.message.contains("below the abstention threshold") })
+        #expect(try context.fetch(FetchDescriptor<ToolCallRecord>()).isEmpty)
+    }
+
     @Test func scoredRouterKeepsMemorySaveDistinctFromLookup() {
         let (container, _) = makeContext()
 
@@ -369,6 +394,20 @@ struct AgenticControlPlaneTests {
 
         #expect(modelNames.contains("RepoIndexRecord"))
         #expect(modelNames.contains("RepoSymbolRecord"))
+    }
+}
+
+private struct FixedLLMProvider: LLMProvider {
+    let name = "Fixed Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+    var response: String
+
+    var status: String {
+        get async { "Fixed test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        LLMResponse(text: response, providerName: name)
     }
 }
 

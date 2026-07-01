@@ -50,6 +50,52 @@ struct SettingsView: View {
                 }
             }
 
+            if container.settingsStore.providerMode == .mlx {
+                Section("MLX Local") {
+                    Picker("Model", selection: mlxModelSelection) {
+                        ForEach(MLXModelPreset.all) { preset in
+                            Text(preset.name).tag(preset.id)
+                        }
+                        Text("Custom").tag(MLXModelPreset.customID)
+                    }
+                    TextField("Hugging Face model ID", text: mlxModelID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.footnote.monospaced())
+
+                    if let preset = MLXModelPreset.preset(for: container.settingsStore.mlxModelID) {
+                        MLXModelPresetSummary(preset: preset)
+                        Button("Use Recommended Parameters") {
+                            applyMLXPresetParameters(preset)
+                        }
+                    } else {
+                        LabeledContent("Preset") {
+                            Text("Custom")
+                        }
+                        Text("Custom IDs must be compatible with MLX Swift LM's LLMRegistry. If loading fails, choose a listed preset or install a compatible MLX model repository.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    LabeledContent("Max Tokens") {
+                        Stepper("\(container.settingsStore.mlxMaxTokens)", value: mlxMaxTokens, in: 64...4096, step: 64)
+                    }
+                    LabeledContent("Temperature") {
+                        Stepper(String(format: "%.1f", container.settingsStore.mlxTemperature), value: mlxTemperature, in: 0.0...2.0, step: 0.1)
+                    }
+                    LabeledContent("Model Loading") {
+                        Text(container.settingsStore.remoteProviderEnabled ? "Allowed" : "Blocked")
+                    }
+                    Button("Test MLX Local Model") {
+                        Task { await testMLXLocalModel() }
+                    }
+                    .disabled(container.settingsStore.mlxModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Text("MLX is local-first once model files are loaded. First load may download the configured Hugging Face model and is blocked unless Network is explicitly enabled.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Network") {
                 Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 LabeledContent("Timeout") {
@@ -63,7 +109,7 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Text("Network is off by default. Remote provider calls, web fetches, weather lookups, Maps search, and in-app web navigation stay disabled unless this toggle is on.")
+                Text("Network is off by default. Remote provider calls, MLX model preparation, web fetches, weather lookups, Maps search, and in-app web navigation stay disabled unless this toggle is on.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -260,6 +306,42 @@ struct SettingsView: View {
         }
     }
 
+    private var mlxModelID: Binding<String> {
+        Binding {
+            container.settingsStore.mlxModelID
+        } set: { value in
+            container.settingsStore.mlxModelID = value
+        }
+    }
+
+    private var mlxModelSelection: Binding<String> {
+        Binding {
+            MLXModelPreset.preset(for: container.settingsStore.mlxModelID)?.id ?? MLXModelPreset.customID
+        } set: { value in
+            guard value != MLXModelPreset.customID else {
+                container.settingsStore.mlxModelID = ""
+                return
+            }
+            container.settingsStore.mlxModelID = value
+        }
+    }
+
+    private var mlxMaxTokens: Binding<Int> {
+        Binding {
+            container.settingsStore.mlxMaxTokens
+        } set: { value in
+            container.settingsStore.mlxMaxTokens = value
+        }
+    }
+
+    private var mlxTemperature: Binding<Double> {
+        Binding {
+            container.settingsStore.mlxTemperature
+        } set: { value in
+            container.settingsStore.mlxTemperature = value
+        }
+    }
+
     private var remoteEndpoint: Binding<String> {
         Binding {
             container.settingsStore.remoteEndpoint
@@ -358,6 +440,24 @@ struct SettingsView: View {
         } catch {
             connectionTestStatus = "Remote connection failed: \(error.localizedDescription)"
         }
+    }
+
+    private func testMLXLocalModel() async {
+        connectionTestStatus = "Testing MLX local model..."
+        do {
+            let provider = container.llmProvider()
+            let response = try await provider.complete(request: LLMRequest(prompt: "Reply with exactly: ok", conversationContext: [], retrievedContext: []))
+            connectionTestStatus = "MLX local model responded: \(response.text.prefix(80))"
+            container.diagnostics.providerStatus = await provider.status
+        } catch {
+            connectionTestStatus = "MLX local model failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyMLXPresetParameters(_ preset: MLXModelPreset) {
+        container.settingsStore.mlxMaxTokens = preset.recommendedMaxTokens
+        container.settingsStore.mlxTemperature = preset.recommendedTemperature
+        connectionTestStatus = "Applied recommended MLX parameters for \(preset.name)."
     }
 
     private func runDeveloperDiagnostics() async {
@@ -496,5 +596,29 @@ struct SettingsView: View {
         #else
         nativeToolTestStatus = "PDFKit is unavailable on this platform."
         #endif
+    }
+}
+
+private struct MLXModelPresetSummary: View {
+    var preset: MLXModelPreset
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent("Family") {
+                Text(preset.family)
+            }
+            LabeledContent("Size") {
+                Text(preset.size)
+            }
+            LabeledContent("Best For") {
+                Text(preset.fit)
+            }
+            LabeledContent("Recommended") {
+                Text("\(preset.recommendedMaxTokens) tokens, \(preset.recommendedTemperature, format: .number.precision(.fractionLength(1))) temp")
+            }
+            Text(preset.notes)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
     }
 }

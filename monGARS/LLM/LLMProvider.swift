@@ -112,6 +112,7 @@ struct LLMProviderCapabilities: Sendable, Codable {
     var isLocal: Bool
 
     static let foundationLocal = LLMProviderCapabilities(supportsStreaming: false, supportsTools: false, supportsVision: false, supportsJSONMode: false, maxContextTokens: 4_000, isLocal: true)
+    static let mlxLocal = LLMProviderCapabilities(supportsStreaming: true, supportsTools: false, supportsVision: false, supportsJSONMode: false, maxContextTokens: 4_000, isLocal: true)
     static let remote = LLMProviderCapabilities(supportsStreaming: false, supportsTools: false, supportsVision: false, supportsJSONMode: true, maxContextTokens: 8_000, isLocal: false)
 }
 

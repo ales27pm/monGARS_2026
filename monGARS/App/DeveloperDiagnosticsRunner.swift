@@ -855,6 +855,8 @@ enum DeveloperDiagnosticsRunner {
         builder.add("Configuration")
         builder.add("- Provider mode: \(settings.providerMode.label)")
         builder.add("- Network enabled: \(settings.remoteProviderEnabled)")
+        builder.add("- MLX model id configured: \(!settings.mlxModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)")
+        builder.add("- MLX model loading network: \(settings.remoteProviderEnabled ? "allowed" : "blocked")")
         builder.add("- Developer Mode local-network override: \(settings.developerModeEnabled)")
         builder.add("- Autonomy: \(settings.autonomyLevel.label)")
         builder.add("- Timeout seconds: \(Int(settings.networkTimeoutSeconds))")
@@ -909,6 +911,7 @@ enum DeveloperDiagnosticsRunner {
         #else
         builder.add("- PDFKit: unavailable")
         #endif
+        builder.add("- MLX Swift LM: \(MLXLocalProvider.buildStatus)")
         builder.add("- Document embeddings: \(documentService.embeddingStatusDescription)")
         builder.add("")
     }
@@ -967,7 +970,21 @@ enum DeveloperDiagnosticsRunner {
             builder.add("- Runs: none")
         } else {
             for run in runs {
-                builder.add("- Run \(run.id.uuidString): \(run.statusRawValue), phase \(run.currentPhase), goal \(DiagnosticsRedactor.redact(run.goal, maxLength: 120))")
+                var parts = [
+                    "- Run \(run.id.uuidString): \(run.statusRawValue)",
+                    "created \(Self.isoDate(run.createdAt))",
+                    "updated \(Self.isoDate(run.updatedAt))",
+                    "phase \(run.currentPhase)",
+                    "step \(run.currentStep)/\(run.maxSteps)",
+                    "goal \(DiagnosticsRedactor.redact(run.goal, maxLength: 120))"
+                ]
+                if let error = run.lastError, !error.isEmpty {
+                    parts.append("error \(DiagnosticsRedactor.redact(error, maxLength: 180))")
+                }
+                if !run.summary.isEmpty {
+                    parts.append("summary \(DiagnosticsRedactor.redact(run.summary, maxLength: 180))")
+                }
+                builder.add(parts.joined(separator: ", "))
             }
         }
 

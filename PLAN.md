@@ -4,7 +4,7 @@
 
 1. Keep the first release local-first and reliable.
 2. Treat Apple Foundation Models as the preferred local provider when iOS 26 runtime support is available.
-3. Use Foundation Models only for production local LLM behavior; unsupported runtimes fail honestly.
+3. Offer MLX Local as an explicit production local provider; unsupported or unlinked runtimes fail honestly.
 4. Expand tool routing with explicit tests before adding more tools.
 5. Keep the autonomous loop inspectable: every step writes trace, checkpoints, and tool-call evidence.
 6. Keep provider and tool network behavior opt-in and visible in Settings, with localhost/private LAN blocked unless Developer Mode is explicitly enabled.
@@ -23,20 +23,20 @@ The request `summarize my imported document and remember the key points` is expe
 - Build the app with:
 
 ```sh
-xcodebuild build -project monGARS.xcodeproj -scheme monGARS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
-xcodebuild archive -project monGARS.xcodeproj -scheme monGARS -configuration Release -destination 'generic/platform=iOS' -archivePath /tmp/monGARS-Unsigned.xcarchive CODE_SIGNING_ALLOWED=NO
+xcodebuild build -project monGARS.xcodeproj -scheme monGARS -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
+xcodebuild archive -project monGARS.xcodeproj -scheme monGARS -configuration Release -destination 'generic/platform=iOS' -archivePath /tmp/monGARS-Unsigned.xcarchive CODE_SIGNING_ALLOWED=NO -skipMacroValidation
 ```
 
 - Compile app and tests with:
 
 ```sh
-xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destination 'id=<SIMULATOR_ID>'
+xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destination 'id=<SIMULATOR_ID>' -skipMacroValidation
 ```
 
 - Run tests with:
 
 ```sh
-xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO
+xcodebuild test-without-building -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
 ```
 
 On this machine, `build-for-testing` and `test-without-building` succeeded against the explicit `monGARS Test iPhone` simulator. The latest full simulator run passed 48 Swift Testing tests after the native-tools pass.
@@ -45,7 +45,8 @@ For slow or intentionally skipped simulator launch cycles, use Settings > Develo
 
 ## Current Known Gaps
 
-- Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. The current project build number is `202606280033`, so that upload is historical evidence rather than a current-build upload.
+- Latest signed archive export/upload succeeded for build `20260629050400`; App Store Connect upload Delivery UUID `d2e0f7ca-abb1-445d-b617-466c286d6784`.
 - Document summarization is based on imported text excerpts; retrieval ranking can include NaturalLanguage contextual embeddings when on-device assets are available.
 - Network-capable tools remain disabled until Settings enables network provider and tools, even after approval.
+- MLX Local requires Xcode's Metal Toolchain, package macro trust or `-skipMacroValidation`, available device storage, and a supported Hugging Face model id.
 - WeatherKit still requires the Apple entitlement/provisioning path on device; otherwise weather uses the configured OpenWeather-compatible secondary provider.

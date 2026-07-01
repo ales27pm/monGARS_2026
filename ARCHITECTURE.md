@@ -31,7 +31,7 @@ Startup records whether SwiftData opened durable storage, recovered durable stor
 `monGARS/LLM` defines `LLMProvider` plus concrete providers.
 
 - `FoundationModelProvider` imports FoundationModels behind `canImport` and uses `LanguageModelSession` only inside iOS 26 availability checks.
-- Foundation Models are the only local LLM provider in production; unsupported runtimes fail honestly.
+- `MLXLocalProvider` imports MLX Swift LM packages behind `canImport`, loads the configured `LLMRegistry` model through Hugging Face integration, supports complete and streaming responses, blocks first-load model preparation while the Settings network toggle is off, and fails honestly when MLX is not linked or generation returns no user-visible text.
 - `RemoteLLMProvider` posts only when remote mode and the network toggle are explicitly enabled in Settings. It supports OpenAI-compatible chat completions plus Ollama generate/chat payloads, optional bearer auth from Keychain, non-stream completion, and provider streaming through `NetworkClient` line streaming when the endpoint emits SSE or line-delimited JSON.
 
 ## Agent Runtime And Graph
