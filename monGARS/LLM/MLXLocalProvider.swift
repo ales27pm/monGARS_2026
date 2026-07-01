@@ -40,6 +40,17 @@ struct MLXLocalProvider: LLMProvider {
         }
     }
 
+    static func prepareModel(id modelID: String, allowsModelDownload: Bool) async throws {
+#if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
+        try await MLXLocalModelStore.shared.prepare(
+            modelID: normalizedModelID(modelID),
+            allowsModelDownload: allowsModelDownload
+        )
+#else
+        throw LLMProviderError.unavailable("MLX local inference is unavailable because MLX Swift LM is not linked in this app build.")
+#endif
+    }
+
     func complete(request: LLMRequest) async throws -> LLMResponse {
 #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
         let prompt = LLMPromptAssembler.assemble(request: request)
@@ -103,6 +114,10 @@ private actor MLXLocalModelStore {
     }
 
     private var loadedModel: LoadedModel?
+
+    func prepare(modelID: String, allowsModelDownload: Bool) async throws {
+        _ = try await container(modelID: modelID, allowsModelDownload: allowsModelDownload)
+    }
 
     func complete(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool) async throws -> String {
         var output = ""

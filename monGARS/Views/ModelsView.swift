@@ -9,6 +9,7 @@ struct ModelsView: View {
     @State private var modelStatus: String?
     @State private var isRefreshing = false
     @State private var isDownloading = false
+    @State private var isPreparingMLXModel = false
 
     var body: some View {
         Form {
@@ -36,6 +37,72 @@ struct ModelsView: View {
                 }
                 LabeledContent("Max Context") {
                     Text("\(capabilities.maxContextTokens) tokens")
+                }
+            }
+
+            Section("On-Device MLX Model") {
+                Picker("Model", selection: mlxModelSelection) {
+                    ForEach(MLXModelPreset.all) { preset in
+                        Text(preset.name).tag(preset.id)
+                    }
+                    Text("Custom").tag(MLXModelPreset.customID)
+                }
+
+                TextField("Hugging Face model ID", text: mlxModelID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.footnote.monospaced())
+
+                if let preset = MLXModelPreset.preset(for: container.settingsStore.mlxModelID) {
+                    ModelsMLXPresetSummary(preset: preset)
+                    Button("Use Recommended Parameters") {
+                        applyMLXPresetParameters(preset)
+                    }
+                } else {
+                    LabeledContent("Preset") {
+                        Text("Custom")
+                    }
+                    Text("Custom IDs must be compatible with MLX Swift LM's LLMRegistry.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                LabeledContent("Max Tokens") {
+                    Stepper("\(container.settingsStore.mlxMaxTokens)", value: mlxMaxTokens, in: 64...4096, step: 64)
+                }
+                LabeledContent("Temperature") {
+                    Stepper(String(format: "%.1f", container.settingsStore.mlxTemperature), value: mlxTemperature, in: 0.0...2.0, step: 0.1)
+                }
+                LabeledContent("Network") {
+                    Text(container.settingsStore.remoteProviderEnabled ? "Allowed" : "Off")
+                }
+
+                Button {
+                    useMLXModel()
+                } label: {
+                    Label("Use MLX Model", systemImage: "checkmark.circle")
+                }
+                .disabled(normalizedMLXModelID.isEmpty)
+
+                Button {
+                    Task { await prepareMLXModel() }
+                } label: {
+                    if isPreparingMLXModel {
+                        Label("Preparing...", systemImage: "arrow.down.circle")
+                    } else {
+                        Label("Download to Device", systemImage: "arrow.down.circle")
+                    }
+                }
+                .disabled(!canPrepareMLXModel)
+
+                if let mlxPreparationBlockReason {
+                    Text(mlxPreparationBlockReason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if let mlxPreparationNote {
+                    Text(mlxPreparationNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -101,6 +168,12 @@ struct ModelsView: View {
                 }
                 .disabled(!canDownload)
 
+                if let remoteDownloadBlockReason {
+                    Text(remoteDownloadBlockReason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Text("Downloads use Ollama-compatible model management endpoints. OpenAI-compatible remote endpoints do not expose an in-app model download API.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -117,6 +190,12 @@ struct ModelsView: View {
                     }
                 }
                 .disabled(!canRefreshInstalledModels)
+
+                if let remoteManagementBlockReason {
+                    Text(remoteManagementBlockReason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
                 if installedModels.isEmpty {
                     Text("No installed models loaded from the configured endpoint.")
@@ -211,6 +290,45 @@ struct ModelsView: View {
         }
     }
 
+    private var mlxModelID: Binding<String> {
+        Binding {
+            container.settingsStore.mlxModelID
+        } set: { value in
+            container.settingsStore.mlxModelID = value
+        }
+    }
+
+    private var mlxModelSelection: Binding<String> {
+        Binding {
+            MLXModelPreset.preset(for: container.settingsStore.mlxModelID)?.id ?? MLXModelPreset.customID
+        } set: { value in
+            guard value != MLXModelPreset.customID else {
+                container.settingsStore.mlxModelID = ""
+                return
+            }
+            container.settingsStore.mlxModelID = value
+            if let preset = MLXModelPreset.preset(for: value) {
+                applyMLXPresetParameters(preset)
+            }
+        }
+    }
+
+    private var mlxMaxTokens: Binding<Int> {
+        Binding {
+            container.settingsStore.mlxMaxTokens
+        } set: { value in
+            container.settingsStore.mlxMaxTokens = value
+        }
+    }
+
+    private var mlxTemperature: Binding<Double> {
+        Binding {
+            container.settingsStore.mlxTemperature
+        } set: { value in
+            container.settingsStore.mlxTemperature = value
+        }
+    }
+
     private var networkTimeoutSeconds: Binding<Double> {
         Binding {
             container.settingsStore.networkTimeoutSeconds
@@ -231,15 +349,57 @@ struct ModelsView: View {
         modelName.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var normalizedMLXModelID: String {
+        container.settingsStore.mlxModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var mlxPreparationBlockReason: String? {
+        ModelManagementReadiness.mlxPreparationBlockReason(
+            modelID: container.settingsStore.mlxModelID,
+            isLinked: MLXLocalProvider.isLinked
+        )
+    }
+
+    private var mlxPreparationNote: String? {
+        guard !container.settingsStore.remoteProviderEnabled else { return nil }
+        return "Network access is off. Cached MLX models can still prepare; new Hugging Face downloads need network access."
+    }
+
+    private var canPrepareMLXModel: Bool {
+        !isPreparingMLXModel && mlxPreparationBlockReason == nil
+    }
+
+    private var remoteManagementBlockReason: String? {
+        ModelManagementReadiness.remoteManagementBlockReason(
+            endpoint: container.settingsStore.remoteEndpoint,
+            networkEnabled: container.settingsStore.remoteProviderEnabled,
+            allowsLocalNetworkHosts: container.settingsStore.developerModeEnabled
+        )
+    }
+
+    private var remoteDownloadBlockReason: String? {
+        ModelManagementReadiness.remoteDownloadBlockReason(
+            modelName: modelName,
+            endpoint: container.settingsStore.remoteEndpoint,
+            networkEnabled: container.settingsStore.remoteProviderEnabled,
+            allowsLocalNetworkHosts: container.settingsStore.developerModeEnabled
+        )
+    }
+
     private var canRefreshInstalledModels: Bool {
-        !isRefreshing && container.settingsStore.providerMode == .remote && container.settingsStore.remoteProviderEnabled
+        !isRefreshing && remoteManagementBlockReason == nil
     }
 
     private var canDownload: Bool {
-        canRefreshInstalledModels && !isDownloading && !normalizedModelName.isEmpty && ModelManagementClient.ollamaBaseURL(for: container.settingsStore.remoteEndpoint) != nil
+        !isDownloading && remoteDownloadBlockReason == nil
     }
 
     private func refreshInstalledModels() async {
+        if let remoteManagementBlockReason {
+            modelStatus = remoteManagementBlockReason
+            return
+        }
+
         isRefreshing = true
         modelStatus = "Loading installed models..."
         defer { isRefreshing = false }
@@ -256,6 +416,10 @@ struct ModelsView: View {
     private func downloadModel() async {
         let requestedModel = normalizedModelName
         guard !requestedModel.isEmpty else { return }
+        if let remoteDownloadBlockReason {
+            modelStatus = remoteDownloadBlockReason
+            return
+        }
 
         isDownloading = true
         modelStatus = "Starting download for \(requestedModel)..."
@@ -273,6 +437,51 @@ struct ModelsView: View {
         } catch {
             modelStatus = "Download failed: \(error.localizedDescription)"
         }
+    }
+
+    private func useMLXModel() {
+        let requestedModel = normalizedMLXModelID
+        guard !requestedModel.isEmpty else { return }
+        container.settingsStore.mlxModelID = requestedModel
+        container.settingsStore.providerMode = .mlx
+        modelStatus = "Active MLX model set to \(requestedModel)."
+        Task {
+            container.diagnostics.providerStatus = await container.llmProvider().status
+        }
+    }
+
+    private func prepareMLXModel() async {
+        let requestedModel = normalizedMLXModelID
+        guard !requestedModel.isEmpty else { return }
+        if let mlxPreparationBlockReason {
+            modelStatus = mlxPreparationBlockReason
+            return
+        }
+
+        isPreparingMLXModel = true
+        modelStatus = "Preparing MLX model \(requestedModel)..."
+        defer { isPreparingMLXModel = false }
+
+        do {
+            container.settingsStore.mlxModelID = requestedModel
+            try await MLXLocalProvider.prepareModel(
+                id: requestedModel,
+                allowsModelDownload: container.settingsStore.remoteProviderEnabled
+            )
+            container.settingsStore.providerMode = .mlx
+            modelStatus = "MLX model \(requestedModel) is ready on device."
+            container.diagnostics.providerStatus = await container.llmProvider().status
+        } catch is CancellationError {
+            return
+        } catch {
+            modelStatus = "MLX model preparation failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func applyMLXPresetParameters(_ preset: MLXModelPreset) {
+        container.settingsStore.mlxModelID = preset.id
+        container.settingsStore.mlxMaxTokens = preset.recommendedMaxTokens
+        container.settingsStore.mlxTemperature = preset.recommendedTemperature
     }
 
     private func modelManagementClient() throws -> ModelManagementClient {
@@ -342,6 +551,25 @@ struct InstalledRemoteModel: Identifiable, Equatable {
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: Int64(sizeBytes))
+    }
+}
+
+private struct ModelsMLXPresetSummary: View {
+    var preset: MLXModelPreset
+
+    var body: some View {
+        LabeledContent("Family") {
+            Text(preset.family)
+        }
+        LabeledContent("Size") {
+            Text(preset.size)
+        }
+        LabeledContent("Fit") {
+            Text(preset.fit)
+        }
+        Text(preset.notes)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -444,6 +672,42 @@ struct ModelManagementClient: Sendable {
             headers["Authorization"] = "Bearer \(trimmedKey)"
         }
         return headers
+    }
+}
+
+enum ModelManagementReadiness {
+    static func remoteDownloadBlockReason(modelName: String, endpoint: String, networkEnabled: Bool, allowsLocalNetworkHosts: Bool) -> String? {
+        if modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter a model name before downloading."
+        }
+        return remoteManagementBlockReason(
+            endpoint: endpoint,
+            networkEnabled: networkEnabled,
+            allowsLocalNetworkHosts: allowsLocalNetworkHosts
+        )
+    }
+
+    static func remoteManagementBlockReason(endpoint: String, networkEnabled: Bool, allowsLocalNetworkHosts: Bool) -> String? {
+        guard networkEnabled else {
+            return "Enable network access before contacting an Ollama endpoint."
+        }
+        guard let baseURL = ModelManagementClient.ollamaBaseURL(for: endpoint) else {
+            return "Use an Ollama-compatible endpoint such as http://localhost:11434/api/generate."
+        }
+        if let host = baseURL.host, NetworkPolicy.isBlockedHost(host), !allowsLocalNetworkHosts {
+            return "Allow localhost and private LAN hosts before contacting \(host)."
+        }
+        return nil
+    }
+
+    static func mlxPreparationBlockReason(modelID: String, isLinked: Bool) -> String? {
+        guard isLinked else {
+            return "MLX Swift LM is not linked in this app build."
+        }
+        guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Choose an MLX model before preparing it on device."
+        }
+        return nil
     }
 }
 

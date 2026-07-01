@@ -236,6 +236,16 @@ struct MLXModelPreset: Identifiable, Equatable, Sendable {
             recommendedTemperature: 0.3
         ),
         MLXModelPreset(
+            id: "mlx-community/dolphin3.0-llama3.2-3B-4Bit",
+            name: "Dolphin 3.0 Llama 3.2 3B",
+            family: "Dolphin/Llama",
+            size: "Medium",
+            fit: "Chat and coding",
+            notes: "Dolphin-tuned Llama 3.2 3B option with a practical 4-bit on-device footprint.",
+            recommendedMaxTokens: 1024,
+            recommendedTemperature: 0.4
+        ),
+        MLXModelPreset(
             id: "mlx-community/gemma-3-1b-it-qat-4bit",
             name: "Gemma 3 1B",
             family: "Gemma",

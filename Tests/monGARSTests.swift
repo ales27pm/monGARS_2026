@@ -446,6 +446,7 @@ struct MonGARSTests {
         #expect(MLXModelPreset.all.count >= 8)
         #expect(MLXModelPreset.default.id == "mlx-community/Qwen3-0.6B-4bit")
         #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/Llama-3.2-3B-Instruct-4bit" })
+        #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/dolphin3.0-llama3.2-3B-4Bit" })
         #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/gemma-3n-E2B-it-lm-4bit" })
 
         let ids = MLXModelPreset.all.map(\.id)
@@ -455,8 +456,10 @@ struct MonGARSTests {
 
     @Test func mlxModelPresetLookupAcceptsTrimmedModelID() {
         let preset = MLXModelPreset.preset(for: "  mlx-community/Qwen3-1.7B-4bit\n")
+        let dolphin = MLXModelPreset.preset(for: " mlx-community/dolphin3.0-llama3.2-3B-4Bit ")
 
         #expect(preset?.name == "Qwen3 1.7B")
+        #expect(dolphin?.name == "Dolphin 3.0 Llama 3.2 3B")
         #expect(MLXModelPreset.preset(for: "mlx-community/not-registered") == nil)
     }
 
@@ -487,6 +490,7 @@ struct MonGARSTests {
         #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434/api/generate")?.absoluteString == "http://localhost:11434")
         #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434/api/chat")?.absoluteString == "http://localhost:11434")
         #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434")?.absoluteString == "http://localhost:11434")
+        #expect(ModelManagementClient.ollamaBaseURL(for: "http://192.168.1.10:11434/api/generate")?.absoluteString == "http://192.168.1.10:11434")
         #expect(ModelManagementClient.ollamaBaseURL(for: "https://api.openai.com/v1/chat/completions") == nil)
     }
 
@@ -494,6 +498,46 @@ struct MonGARSTests {
         #expect(ModelManagementClient.pullStatusMessage(from: #"{"status":"pulling manifest"}"#) == "pulling manifest")
         #expect(ModelManagementClient.pullStatusMessage(from: #"{"status":"downloading","completed":25,"total":100}"#) == "downloading 25%")
         #expect(ModelManagementClient.pullStatusMessage(from: "not-json") == nil)
+    }
+
+    @Test func modelManagementReadinessExplainsRemoteDownloadBlocks() {
+        #expect(ModelManagementReadiness.remoteDownloadBlockReason(
+            modelName: "qwen3",
+            endpoint: "http://localhost:11434/api/generate",
+            networkEnabled: true,
+            allowsLocalNetworkHosts: true
+        ) == nil)
+        #expect(ModelManagementReadiness.remoteManagementBlockReason(
+            endpoint: "http://localhost:11434/api/generate",
+            networkEnabled: false,
+            allowsLocalNetworkHosts: true
+        )?.contains("Enable network access") == true)
+        #expect(ModelManagementReadiness.remoteManagementBlockReason(
+            endpoint: "http://localhost:11434/api/generate",
+            networkEnabled: true,
+            allowsLocalNetworkHosts: false
+        )?.contains("Allow localhost") == true)
+        #expect(ModelManagementReadiness.remoteDownloadBlockReason(
+            modelName: "  ",
+            endpoint: "http://localhost:11434/api/generate",
+            networkEnabled: true,
+            allowsLocalNetworkHosts: true
+        )?.contains("Enter a model name") == true)
+    }
+
+    @Test func modelManagementReadinessExplainsMLXPreparationBlocks() {
+        #expect(ModelManagementReadiness.mlxPreparationBlockReason(
+            modelID: "mlx-community/Qwen3-0.6B-4bit",
+            isLinked: true
+        ) == nil)
+        #expect(ModelManagementReadiness.mlxPreparationBlockReason(
+            modelID: "  ",
+            isLinked: true
+        )?.contains("Choose an MLX model") == true)
+        #expect(ModelManagementReadiness.mlxPreparationBlockReason(
+            modelID: "mlx-community/Qwen3-0.6B-4bit",
+            isLinked: false
+        )?.contains("not linked") == true)
     }
 
     @Test func toolRouterRoutesPrivacyGatedTools() {
