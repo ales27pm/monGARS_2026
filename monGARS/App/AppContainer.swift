@@ -41,8 +41,19 @@ final class AppContainer {
             reflector: AgentReflector(),
             contextBuilder: ContextBuilder(memoryService: memoryService, documentService: documentService)
         )
-        AuditMetadataBackfillService.run(context: ModelContext(modelContainer))
-        diagnostics.lastError = persistenceRecoveryMessage
+        let startupContext = ModelContext(modelContainer)
+        AuditMetadataBackfillService.run(context: startupContext)
+        do {
+            _ = try AgentRunRecoveryService.recoverStaleRunningRuns(
+                context: startupContext,
+                staleAfterSeconds: max(settingsStore.networkTimeoutSeconds * 2, 120)
+            )
+        } catch {
+            diagnostics.lastError = "Could not recover stale agent runs: \(error.localizedDescription)"
+        }
+        if diagnostics.lastError == nil {
+            diagnostics.lastError = persistenceRecoveryMessage
+        }
     }
 
     static var schemaModels: [any PersistentModel.Type] {
@@ -174,5 +185,38 @@ final class AppContainer {
         } catch {
             return "Could not quarantine the previous SwiftData store: \(error.localizedDescription)"
         }
+    }
+}
+
+enum AgentRunRecoveryService {
+    @MainActor
+    @discardableResult
+    static func recoverStaleRunningRuns(
+        context: ModelContext,
+        now: Date = .now,
+        staleAfterSeconds: TimeInterval = 120
+    ) throws -> Int {
+        let cutoff = now.addingTimeInterval(-staleAfterSeconds)
+        let runningStatus = AgentRunStatus.running.rawValue
+        let descriptor = FetchDescriptor<AgentRunRecord>(
+            predicate: #Predicate { run in
+                run.statusRawValue == runningStatus && run.updatedAt < cutoff
+            }
+        )
+        let staleRuns = try context.fetch(descriptor)
+        guard !staleRuns.isEmpty else { return 0 }
+
+        for run in staleRuns {
+            let message = "Recovered stale running run after app restart; previous execution did not finish before timeout."
+            run.statusRawValue = AgentRunStatus.timedOut.rawValue
+            run.requiresApproval = false
+            run.lastError = AgentRuntimeError.timedOut.localizedDescription
+            run.completedAt = now
+            run.updatedAt = now
+            context.insert(AgentTraceRecord(runID: run.id, stepIndex: run.currentStep, phase: run.currentPhase, message: message, createdAt: now))
+            context.insert(AgentCheckpointRecord(runID: run.id, nodeID: AgentRunStatus.timedOut.rawValue, stateSummary: message, createdAt: now))
+        }
+        try context.safeSave()
+        return staleRuns.count
     }
 }

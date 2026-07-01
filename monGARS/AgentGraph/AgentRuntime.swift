@@ -196,6 +196,74 @@ private struct ToolCallSnapshot: Sendable {
     var createdAt: Date
 }
 
+private final class AsyncTimeoutRace<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var operationTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var pendingResult: Result<Value, Error>?
+    private var completed = false
+
+    func configure(
+        continuation: CheckedContinuation<Value, Error>,
+        operationTask: Task<Void, Never>,
+        timeoutTask: Task<Void, Never>
+    ) {
+        var resultToResume: Result<Value, Error>?
+        var shouldCancelTasks = false
+
+        lock.lock()
+        if completed {
+            resultToResume = pendingResult
+            pendingResult = nil
+            shouldCancelTasks = true
+        } else {
+            self.continuation = continuation
+            self.operationTask = operationTask
+            self.timeoutTask = timeoutTask
+        }
+        lock.unlock()
+
+        if shouldCancelTasks {
+            operationTask.cancel()
+            timeoutTask.cancel()
+            continuation.resume(with: resultToResume ?? .failure(CancellationError()))
+        }
+    }
+
+    func finish(_ result: Result<Value, Error>) {
+        var continuationToResume: CheckedContinuation<Value, Error>?
+        var operationTaskToCancel: Task<Void, Never>?
+        var timeoutTaskToCancel: Task<Void, Never>?
+
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+
+        completed = true
+        continuationToResume = continuation
+        operationTaskToCancel = operationTask
+        timeoutTaskToCancel = timeoutTask
+        continuation = nil
+        operationTask = nil
+        timeoutTask = nil
+        if continuationToResume == nil {
+            pendingResult = result
+        }
+        lock.unlock()
+
+        operationTaskToCancel?.cancel()
+        timeoutTaskToCancel?.cancel()
+        continuationToResume?.resume(with: result)
+    }
+
+    func cancel() {
+        finish(.failure(CancellationError()))
+    }
+}
+
 final class AgentTelemetryBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private let inMemoryContainer: ModelContainer?
@@ -418,6 +486,7 @@ struct AgentLoop: Sendable {
                     } else {
                         runRecord.statusRawValue = AgentRunStatus.failed.rawValue
                         runRecord.lastError = error.localizedDescription
+                        runRecord.completedAt = .now
                         runRecord.updatedAt = .now
                         try? recordCheckpoint(state: state, nodeID: AgentRunStatus.failed.rawValue, context: context, includeStateData: true)
                         try? telemetryBuffer.flush(runID: state.runID, to: context)
@@ -538,8 +607,15 @@ struct AgentLoop: Sendable {
         contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .respond, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
             try markPhaseStarted(.respond, state: &state, runRecord: runRecord, context: context)
-            if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
-            let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
+            let remainingSeconds = options.timeoutSeconds - Date().timeIntervalSince(startedAt)
+            guard remainingSeconds > 0 else { throw AgentRuntimeError.timedOut }
+            let response = try await responseText(
+                goal: goal,
+                state: state,
+                provider: provider,
+                contextPackage: contextPackage,
+                timeoutSeconds: remainingSeconds
+            )
             var accumulated = ""
             for word in response.split(separator: " ") {
                 try Task.checkCancellation()
@@ -713,7 +789,7 @@ struct AgentLoop: Sendable {
         return "\(action). Target: \(target). Input: \(DiagnosticsRedactor.redact(goal, maxLength: 180))"
     }
 
-    private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage) async throws -> String {
+    private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage, timeoutSeconds: TimeInterval) async throws -> String {
         if let toolOutput = state.toolResults.last { return UserFacingResponseSanitizer.sanitize(toolOutput) }
         let request = LLMRequest(
             prompt: contextPackage.prompt,
@@ -722,8 +798,48 @@ struct AgentLoop: Sendable {
             segments: contextPackage.segments,
             isPromptPreassembled: true
         )
-        let response = try await provider.complete(request: request)
+        let response = try await withTimeout(seconds: timeoutSeconds) {
+            try await provider.complete(request: request)
+        }
         return try UserFacingResponseSanitizer.sanitizeModelResponse(response.text)
+    }
+
+    private func withTimeout<Value: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        guard seconds > 0 else { throw AgentRuntimeError.timedOut }
+
+        let race = AsyncTimeoutRace<Value>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let operationTask = Task {
+                    do {
+                        let value = try await operation()
+                        race.finish(.success(value))
+                    } catch {
+                        race.finish(.failure(error))
+                    }
+                }
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNanoseconds(for: seconds))
+                        race.finish(.failure(AgentRuntimeError.timedOut))
+                    } catch {
+                        race.finish(.failure(error))
+                    }
+                }
+                race.configure(continuation: continuation, operationTask: operationTask, timeoutTask: timeoutTask)
+            }
+        } onCancel: {
+            race.cancel()
+        }
+    }
+
+    private func timeoutNanoseconds(for seconds: TimeInterval) -> UInt64 {
+        let maximumSeconds = Double(UInt64.max) / 1_000_000_000
+        let clamped = min(max(seconds, 0.001), maximumSeconds)
+        return UInt64((clamped * 1_000_000_000).rounded(.up))
     }
 
     private func durableMemory(from goal: String, state: AgentLoopState) -> String {

@@ -1174,8 +1174,33 @@ struct MonGARSTests {
         #expect(run.statusRawValue == AgentRunStatus.failed.rawValue)
         #expect(run.currentPhase == AgentPhase.respond.rawValue)
         #expect(run.lastError?.contains("model response") == true)
+        #expect(run.completedAt != nil)
         #expect(memories.isEmpty)
         #expect(!traces.contains { $0.phase == AgentPhase.saveMemory.rawValue })
+    }
+
+    @Test func runtimeTimesOutHungProviderAndClosesRunRecord() async throws {
+        let (container, context) = makeContext()
+
+        do {
+            for try await _ in container.agentRuntime.run(
+                goal: "Hi",
+                conversationID: nil,
+                messages: [],
+                provider: HangingLLMProvider(),
+                options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 0.25),
+                context: context
+            ) {}
+            #expect(Bool(false), "A hung provider must time out instead of leaving the run active.")
+        } catch {
+            #expect(error.localizedDescription == AgentRuntimeError.timedOut.localizedDescription)
+        }
+
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+        #expect(run.statusRawValue == AgentRunStatus.timedOut.rawValue)
+        #expect(run.currentPhase == AgentPhase.respond.rawValue)
+        #expect(run.lastError == AgentRuntimeError.timedOut.localizedDescription)
+        #expect(run.completedAt != nil)
     }
 
     @Test func runtimeSavesExplicitIntroductionAfterSuccessfulResponse() async throws {
@@ -1236,6 +1261,38 @@ struct MonGARSTests {
 
         #expect(activeRun.statusRawValue == AgentRunStatus.cancelled.rawValue)
         #expect(activeRun.lastError == AgentRuntimeError.cancelled.localizedDescription)
+    }
+
+    @Test func startupRecoveryMarksStaleRunningRunsTimedOut() throws {
+        let (_, context) = makeContext()
+        let runID = UUID()
+        let oldDate = Date(timeIntervalSince1970: 100)
+        let now = Date(timeIntervalSince1970: 300)
+        let run = AgentRunRecord(
+            id: runID,
+            goal: "Hi",
+            statusRawValue: AgentRunStatus.running.rawValue,
+            currentPhase: AgentPhase.respond.rawValue,
+            currentStep: 5,
+            updatedAt: oldDate
+        )
+        context.insert(run)
+        try context.safeSave()
+
+        let recovered = try AgentRunRecoveryService.recoverStaleRunningRuns(
+            context: context,
+            now: now,
+            staleAfterSeconds: 120
+        )
+
+        #expect(recovered == 1)
+        #expect(run.statusRawValue == AgentRunStatus.timedOut.rawValue)
+        #expect(run.requiresApproval == false)
+        #expect(run.lastError == AgentRuntimeError.timedOut.localizedDescription)
+        #expect(run.completedAt == now)
+
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+        #expect(traces.contains { $0.runID == runID && $0.message.contains("Recovered stale running run") })
     }
 
     @Test func pauseAndCancelPersistControlDiagnostics() throws {
@@ -2070,6 +2127,21 @@ struct SlowLLMProvider: LLMProvider {
     func complete(request: LLMRequest) async throws -> LLMResponse {
         try await Task.sleep(nanoseconds: 5_000_000_000)
         return LLMResponse(text: "slow answer", providerName: name)
+    }
+}
+
+struct HangingLLMProvider: LLMProvider {
+    let name = "Hanging Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+
+    var status: String {
+        get async { "Hanging test provider ready" }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        while true {
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        }
     }
 }
 
