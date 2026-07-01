@@ -3,6 +3,7 @@ import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
     case chat
+    case models
     case memories
     case documents
     case goals
@@ -14,6 +15,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .chat: "Chat"
+        case .models: "Models"
         case .memories: "Memories"
         case .documents: "Documents"
         case .goals: "Goals"
@@ -25,6 +27,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .chat: "bubble.left.and.bubble.right"
+        case .models: "square.stack.3d.up"
         case .memories: "brain"
         case .documents: "doc.text"
         case .goals: "checklist"
@@ -96,6 +99,9 @@ struct RootView: View {
             ChatView(container: container) { section in
                 selection = section
             }
+        case .models:
+            ModelsView(container: container)
+                .navigationTitle(AppSection.models.title)
         case .memories:
             MemoryManagerView(container: container)
                 .navigationTitle(AppSection.memories.title)

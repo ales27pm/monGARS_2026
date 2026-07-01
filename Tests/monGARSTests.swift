@@ -478,9 +478,22 @@ struct MonGARSTests {
         let (container, _) = makeContext()
         _ = RootView(container: container)
 
-        #expect(AppSection.allCases.map(\.title) == ["Chat", "Memories", "Documents", "Goals", "Diagnostics", "Settings"])
+        #expect(AppSection.allCases.map(\.title) == ["Chat", "Models", "Memories", "Documents", "Goals", "Diagnostics", "Settings"])
         #expect(AppSection.allCases.allSatisfy { !$0.icon.isEmpty })
         #expect(AppSection.chat.id == "chat")
+    }
+
+    @Test func modelManagementDetectsOllamaEndpointsOnly() {
+        #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434/api/generate")?.absoluteString == "http://localhost:11434")
+        #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434/api/chat")?.absoluteString == "http://localhost:11434")
+        #expect(ModelManagementClient.ollamaBaseURL(for: "http://localhost:11434")?.absoluteString == "http://localhost:11434")
+        #expect(ModelManagementClient.ollamaBaseURL(for: "https://api.openai.com/v1/chat/completions") == nil)
+    }
+
+    @Test func modelManagementFormatsPullProgress() {
+        #expect(ModelManagementClient.pullStatusMessage(from: #"{"status":"pulling manifest"}"#) == "pulling manifest")
+        #expect(ModelManagementClient.pullStatusMessage(from: #"{"status":"downloading","completed":25,"total":100}"#) == "downloading 25%")
+        #expect(ModelManagementClient.pullStatusMessage(from: "not-json") == nil)
     }
 
     @Test func toolRouterRoutesPrivacyGatedTools() {
