@@ -27,9 +27,8 @@ final class SettingsStore {
             let trimmed = mlxModelID.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed != mlxModelID {
                 mlxModelID = trimmed
-                return
             }
-            UserDefaults.standard.set(mlxModelID, forKey: Keys.mlxModelID)
+            UserDefaults.standard.set(trimmed, forKey: Keys.mlxModelID)
         }
     }
 
@@ -87,8 +86,11 @@ final class SettingsStore {
         remoteProviderEnabled = UserDefaults.standard.bool(forKey: Keys.remoteProviderEnabled)
         mlxModelID = UserDefaults.standard.string(forKey: Keys.mlxModelID) ?? MLXModelPreset.default.id
         mlxMaxTokens = UserDefaults.standard.object(forKey: Keys.mlxMaxTokens) as? Int ?? 512
-        let storedMLXTemperature = UserDefaults.standard.double(forKey: Keys.mlxTemperature)
-        mlxTemperature = storedMLXTemperature > 0 ? storedMLXTemperature : 0.2
+        if UserDefaults.standard.object(forKey: Keys.mlxTemperature) != nil {
+            mlxTemperature = UserDefaults.standard.double(forKey: Keys.mlxTemperature)
+        } else {
+            mlxTemperature = 0.2
+        }
         let timeout = UserDefaults.standard.double(forKey: AppNetworkConfiguration.Keys.timeoutSeconds)
         networkTimeoutSeconds = timeout > 0 ? timeout : 20
         networkMaxRetries = UserDefaults.standard.object(forKey: AppNetworkConfiguration.Keys.maxRetries) as? Int ?? 2
@@ -106,9 +108,6 @@ final class SettingsStore {
         remoteEndpoint = "http://localhost:11434/api/generate"
         remoteModel = "llama3.2"
         remoteAPIKey = ""
-        mlxModelID = MLXModelPreset.default.id
-        mlxMaxTokens = 512
-        mlxTemperature = 0.2
         networkTimeoutSeconds = 20
         networkMaxRetries = 2
         weatherEndpoint = "https://api.openweathermap.org/data/2.5/weather"

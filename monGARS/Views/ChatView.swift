@@ -482,7 +482,7 @@ struct MessageBubble: View {
                 Text(message.createdAt.formatted(date: .abbreviated, time: .shortened))
             }
                     .font(.caption)
-                    .foregroundColor(message.role == .user ? Color.white.opacity(0.75) : Color.secondary)
+                    .foregroundStyle(message.role == .user ? .white.opacity(0.75) : .secondary)
             Text(message.content.isEmpty ? "Thinking..." : message.content)
         }
             .padding(12)

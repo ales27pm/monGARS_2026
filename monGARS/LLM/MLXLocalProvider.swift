@@ -44,15 +44,12 @@ struct MLXLocalProvider: LLMProvider {
 #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
         let prompt = LLMPromptAssembler.assemble(request: request)
         let modelID = Self.normalizedModelID(modelID)
-        let modelAlreadyLoaded = await MLXLocalModelStore.shared.hasLoaded(modelID: modelID)
-        if !allowsModelDownload && !modelAlreadyLoaded {
-            throw LLMProviderError.unavailable("MLX model loading is blocked because network access is off. Enable network access in Settings to prepare the configured model, then run MLX locally.")
-        }
         let text = try await MLXLocalModelStore.shared.complete(
             prompt: prompt,
             modelID: modelID,
             maxTokens: maxTokens,
-            temperature: temperature
+            temperature: temperature,
+            allowsModelDownload: allowsModelDownload
         )
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else {
@@ -69,19 +66,18 @@ struct MLXLocalProvider: LLMProvider {
         let prompt = LLMPromptAssembler.assemble(request: request)
         let modelID = Self.normalizedModelID(modelID)
         return AsyncThrowingStream { continuation in
-            Task {
-                let modelAlreadyLoaded = await MLXLocalModelStore.shared.hasLoaded(modelID: modelID)
-                if !allowsModelDownload && !modelAlreadyLoaded {
-                    continuation.finish(throwing: LLMProviderError.unavailable("MLX model loading is blocked because network access is off. Enable network access in Settings to prepare the configured model, then run MLX locally."))
-                    return
-                }
+            let task = Task {
                 await MLXLocalModelStore.shared.stream(
                     prompt: prompt,
                     modelID: modelID,
                     maxTokens: maxTokens,
                     temperature: temperature,
+                    allowsModelDownload: allowsModelDownload,
                     continuation: continuation
                 )
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
 #else
@@ -93,7 +89,7 @@ struct MLXLocalProvider: LLMProvider {
 
     private static func normalizedModelID(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "mlx-community/Qwen3-0.6B-4bit" : trimmed
+        return trimmed.isEmpty ? MLXModelPreset.default.id : trimmed
     }
 }
 
@@ -108,14 +104,11 @@ private actor MLXLocalModelStore {
 
     private var loadedModel: LoadedModel?
 
-    func hasLoaded(modelID: String) -> Bool {
-        loadedModel?.modelID == modelID
-    }
-
-    func complete(prompt: String, modelID: String, maxTokens: Int, temperature: Double) async throws -> String {
+    func complete(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool) async throws -> String {
         var output = ""
-        let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature)
+        let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature, allowsModelDownload: allowsModelDownload)
         for await item in stream {
+            try Task.checkCancellation()
             if let chunk = item.chunk {
                 output += chunk
             }
@@ -123,10 +116,11 @@ private actor MLXLocalModelStore {
         return output
     }
 
-    func stream(prompt: String, modelID: String, maxTokens: Int, temperature: Double, continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+    func stream(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool, continuation: AsyncThrowingStream<String, Error>.Continuation) async {
         do {
-            let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature)
+            let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature, allowsModelDownload: allowsModelDownload)
             for await item in stream {
+                try Task.checkCancellation()
                 if let chunk = item.chunk {
                     continuation.yield(chunk)
                 }
@@ -137,8 +131,8 @@ private actor MLXLocalModelStore {
         }
     }
 
-    private func generationStream(prompt: String, modelID: String, maxTokens: Int, temperature: Double) async throws -> AsyncStream<Generation> {
-        let container = try await container(modelID: modelID)
+    private func generationStream(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool) async throws -> AsyncStream<Generation> {
+        let container = try await container(modelID: modelID, allowsModelDownload: allowsModelDownload)
         let input = UserInput(
             chat: [
                 .system(systemPrompt),
@@ -153,14 +147,103 @@ private actor MLXLocalModelStore {
         )
     }
 
-    private func container(modelID: String) async throws -> ModelContainer {
+    private func container(modelID: String, allowsModelDownload: Bool) async throws -> ModelContainer {
         if let loadedModel, loadedModel.modelID == modelID {
             return loadedModel.container
         }
-        let configuration = LLMRegistry.shared.configuration(id: modelID)
+        let configuration = try Self.configurationForLoad(modelID: modelID, allowsModelDownload: allowsModelDownload)
         let container = try await #huggingFaceLoadModelContainer(configuration: configuration)
         loadedModel = LoadedModel(modelID: modelID, container: container)
         return container
+    }
+
+    private static func configurationForLoad(modelID: String, allowsModelDownload: Bool) throws -> ModelConfiguration {
+        let remoteConfiguration = LLMRegistry.shared.configuration(id: modelID)
+        if allowsModelDownload {
+            return remoteConfiguration
+        }
+        guard let cachedConfiguration = cachedConfiguration(for: remoteConfiguration) else {
+            throw LLMProviderError.unavailable("MLX model loading is blocked because network access is off and the configured model is not available in the local Hugging Face cache. Enable network access in Settings once to prepare the model, then run MLX locally.")
+        }
+        return cachedConfiguration
+    }
+
+    private static func cachedConfiguration(for configuration: ModelConfiguration) -> ModelConfiguration? {
+        guard case .id(let modelID, let revision) = configuration.id,
+              let modelDirectory = cachedSnapshotDirectory(repoID: modelID, revision: revision) else {
+            return nil
+        }
+
+        let tokenizerSource: TokenizerSource?
+        switch configuration.tokenizerSource {
+        case .directory(let directory):
+            tokenizerSource = .directory(directory)
+        case .id(let tokenizerID, let tokenizerRevision):
+            guard let tokenizerDirectory = cachedSnapshotDirectory(repoID: tokenizerID, revision: tokenizerRevision ?? "main") else {
+                return nil
+            }
+            tokenizerSource = .directory(tokenizerDirectory)
+        case nil:
+            tokenizerSource = nil
+        }
+
+        return ModelConfiguration(
+            directory: modelDirectory,
+            tokenizerSource: tokenizerSource,
+            defaultPrompt: configuration.defaultPrompt,
+            extraEOSTokens: configuration.extraEOSTokens,
+            eosTokenIds: configuration.eosTokenIds,
+            toolCallFormat: configuration.toolCallFormat
+        )
+    }
+
+    private static func cachedSnapshotDirectory(repoID: String, revision: String) -> URL? {
+        let parts = repoID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+
+        let repo = Repo.ID(namespace: parts[0], name: parts[1])
+        let cache = HubCache.default
+        let fileManager = FileManager.default
+        var commitCandidates: [String] = []
+        if let resolved = cache.resolveRevision(repo: repo, kind: .model, ref: revision) {
+            commitCandidates.append(resolved)
+        }
+        commitCandidates.append(revision)
+
+        for commit in commitCandidates {
+            guard let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit),
+                  usableSnapshotDirectory(snapshot, fileManager: fileManager) else { continue }
+            return snapshot
+        }
+
+        let snapshotsRoot = cache.snapshotsDirectory(repo: repo, kind: .model)
+        guard let snapshots = try? fileManager.contentsOfDirectory(
+            at: snapshotsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        return snapshots
+            .filter { usableSnapshotDirectory($0, fileManager: fileManager) }
+            .sorted {
+                let lhsDate = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+            .first
+    }
+
+    private static func usableSnapshotDirectory(_ url: URL, fileManager: FileManager) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+        guard let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return false
+        }
+        return !contents.isEmpty
     }
 
     private func generationParameters(maxTokens: Int, temperature: Double) -> GenerateParameters {

@@ -36,7 +36,7 @@ xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destina
 - Run tests with:
 
 ```sh
-xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
+xcodebuild test-without-building -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
 ```
 
 On this machine, `build-for-testing` and `test-without-building` succeeded against the explicit `monGARS Test iPhone` simulator. The latest full simulator run passed 48 Swift Testing tests after the native-tools pass.
@@ -45,7 +45,7 @@ For slow or intentionally skipped simulator launch cycles, use Settings > Develo
 
 ## Current Known Gaps
 
-- Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. The current project build number is `202606280033`, so that upload is historical evidence rather than a current-build upload.
+- Latest signed archive export/upload succeeded for build `20260629050400`; App Store Connect upload Delivery UUID `d2e0f7ca-abb1-445d-b617-466c286d6784`.
 - Document summarization is based on imported text excerpts; retrieval ranking can include NaturalLanguage contextual embeddings when on-device assets are available.
 - Network-capable tools remain disabled until Settings enables network provider and tools, even after approval.
 - MLX Local requires Xcode's Metal Toolchain, package macro trust or `-skipMacroValidation`, available device storage, and a supported Hugging Face model id.

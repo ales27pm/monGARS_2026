@@ -27,4 +27,4 @@ The default app path makes no developer-backend network call. Remote provider mo
 
 ## Current Verification Objective
 
-The current verified checkpoint is clean app/test compilation with `xcodebuild build-for-testing` against the explicit `monGARS Test iPhone` simulator, followed by a full `xcodebuild test-without-building` simulator run with 48 passing Swift Testing tests. Previous release validation also produced a signed App Store Connect upload for build `202606272226`; that upload predates the current project build number, `202606280033`.
+The current verified checkpoint is clean app/test compilation with `xcodebuild build-for-testing` against the explicit `monGARS Test iPhone` simulator, followed by a full `xcodebuild test-without-building` simulator run with 48 passing Swift Testing tests. Latest release validation produced a signed App Store Connect upload for build `20260629050400`.

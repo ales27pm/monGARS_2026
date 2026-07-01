@@ -60,8 +60,10 @@ struct AgenticControlPlaneTests {
         }
 
         let response = try #require(completedResponse)
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
         #expect(response.contains("Quebec net debt should be answered"))
         #expect(!response.contains("No safe tool selected"))
+        #expect(traces.contains { $0.phase == AgentPhase.selectTool.rawValue && $0.message.contains("below the abstention threshold") })
         #expect(try context.fetch(FetchDescriptor<ToolCallRecord>()).isEmpty)
     }
 

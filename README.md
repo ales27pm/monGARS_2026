@@ -7,8 +7,8 @@ monGARS is a native SwiftUI iOS app for a privacy-first autonomous assistant. It
 - Xcode 26.x or newer recommended.
 - iOS deployment target: 18.0.
 - Foundation Models are used only when the SDK/runtime exposes the needed API. Unsupported runtimes return an honest unavailable error.
-- MLX Local mode uses the checked-in MLX Swift LM packages for on-device local inference. First model load may download the configured Hugging Face model files and is blocked unless the Settings network toggle is enabled; after the model is loaded, inference stays local.
-- Command-line MLX builds require Xcode's Metal Toolchain component and trusted package macros. On fresh machines, run `xcodebuild -downloadComponent MetalToolchain`; non-interactive CI uses `ci_scripts/ci_post_clone.sh` to skip macro fingerprint prompts.
+- MLX Local mode uses the checked-in MLX Swift LM packages for on-device local inference. First model load may download the configured Hugging Face model files and is blocked unless the Settings network toggle is enabled; after the model files are cached, inference can restart from the local Hugging Face cache.
+- Command-line MLX builds require Xcode's Metal Toolchain component and trusted package macros. On fresh machines, run `xcodebuild -downloadComponent MetalToolchain`; non-interactive CI uses `ci_scripts/ci_post_clone.sh` to skip macro fingerprint prompts only when CI/Xcode Cloud environment variables are present.
 
 ## Run
 
@@ -33,7 +33,7 @@ xcodebuild build-for-testing -project monGARS.xcodeproj -scheme monGARS -destina
 Run tests:
 
 ```sh
-xcodebuild test -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
+xcodebuild test-without-building -project monGARS.xcodeproj -scheme monGARS -destination 'platform=iOS Simulator,id=<SIMULATOR_ID>' CODE_SIGNING_ALLOWED=NO -skipMacroValidation
 ```
 
 Current verification on this machine:
@@ -41,7 +41,7 @@ Current verification on this machine:
 - App and test compilation succeeded with `build-for-testing` against the explicit `monGARS Test iPhone` simulator UDID. A shared `monGARS` scheme is checked in so Xcode no longer relies on auto-generated scheme settings for CLI builds.
 - Generic iPhoneOS arm64 compilation succeeded with signing disabled, validating the iOS 18 device build path independently of simulator execution.
 - Unsigned Release archive succeeded at `/tmp/monGARS-Unsigned.xcarchive`; the archive contains `monGARS.app`, dSYMs, bundle id `app.27pm.monGARS`, version `1.0`, and build `202606271944`.
-- Current project build number in `CURRENT_PROJECT_VERSION` is `202606280033`. The App Store Connect upload noted below was an earlier signed upload, not proof that this current build number has been uploaded.
+- Current project build number in `CURRENT_PROJECT_VERSION` is `20260629050400`.
 - Manual simulator launch succeeded on the `monGARS Test iPhone` iOS 26.3 simulator. The app shows a visible startup state, then transitions to Chat.
 - Full simulator execution succeeded with `xcodebuild test-without-building` against `monGARS Test iPhone` after `build-for-testing`; 48 Swift Testing tests passed.
 
@@ -108,7 +108,7 @@ Every run persists an `AgentRunRecord`, trace events, tool calls, and checkpoint
 ## Remaining Limitations
 
 - Full XCTest execution currently passes on the `monGARS Test iPhone` simulator when run without rebuilding after `build-for-testing`.
-- Previous signed archive export/upload succeeded for build `202606272226`; App Store Connect upload Delivery UUID `e7e929d4-aa14-4d3a-b3b2-4317c7f6c49b`. Current project build number is `202606280033`.
+- Latest signed archive export/upload succeeded for build `20260629050400`; App Store Connect upload Delivery UUID `d2e0f7ca-abb1-445d-b617-466c286d6784`.
 - Foundation Models are available only on supported SDK/runtime combinations; unsupported runtimes return an honest unavailable error.
 - MLX Local requires the MLX Swift LM package graph, Xcode's Metal Toolchain, macro trust or `-skipMacroValidation`, enough device storage for model files, and a model id compatible with `LLMRegistry`.
 - Document retrieval uses local hybrid lexical + NaturalLanguage contextual embedding ranking when Apple embedding assets are available on the device.

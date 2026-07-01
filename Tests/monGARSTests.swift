@@ -176,6 +176,12 @@ struct MonGARSTests {
         #expect((results.first?.importance ?? 0) > 0.5)
     }
 
+    @Test func durableFactExtractorOnlyCapturesNameShapedIntroductions() {
+        #expect(DurableFactExtractor.memoryContent(from: "My name is Alexis Boulet") == "User name is Alexis Boulet")
+        #expect(DurableFactExtractor.memoryContent(from: "My name is going to the store tomorrow") == nil)
+        #expect(DurableFactExtractor.memoryContent(from: "Do you prefer tabs or spaces?") == nil)
+    }
+
     @Test func memoryEditExportAndForgetAllWork() throws {
         let (container, context) = makeContext()
         try container.memoryService.save(content: "Remember that my planning window is Friday morning.", context: context)
@@ -355,6 +361,72 @@ struct MonGARSTests {
         #expect(SettingsStore.parseHeaders("X-Empty:") == nil)
     }
 
+    @Test func settingsStorePersistsTrimmedMLXModelID() {
+        let defaults = UserDefaults.standard
+        let key = "mlxModelID"
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let store = SettingsStore()
+        store.mlxModelID = "  mlx-community/Qwen3-1.7B-4bit\n"
+
+        #expect(store.mlxModelID == "mlx-community/Qwen3-1.7B-4bit")
+        #expect(defaults.string(forKey: key) == "mlx-community/Qwen3-1.7B-4bit")
+    }
+
+    @Test func settingsStorePreservesExplicitZeroMLXTemperature() {
+        let defaults = UserDefaults.standard
+        let key = "mlxTemperature"
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        defaults.set(0.0, forKey: key)
+        let store = SettingsStore()
+
+        #expect(store.mlxTemperature == 0.0)
+    }
+
+    @Test func resetNetworkConfigurationPreservesMLXLocalPreferences() {
+        let defaults = UserDefaults.standard
+        let keys = ["mlxModelID", "mlxMaxTokens", "mlxTemperature"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        let store = SettingsStore()
+        store.mlxModelID = "mlx-community/Qwen3-1.7B-4bit"
+        store.mlxMaxTokens = 1024
+        store.mlxTemperature = 0.0
+
+        store.resetNetworkConfiguration()
+
+        #expect(store.mlxModelID == "mlx-community/Qwen3-1.7B-4bit")
+        #expect(store.mlxMaxTokens == 1024)
+        #expect(store.mlxTemperature == 0.0)
+    }
+
     @Test func mlxProviderModeIsRealLocalProviderWithoutNetworkGate() async {
         #expect(ProviderMode.allCases.contains(.mlx))
         #expect(ProviderMode.mlx.label == "MLX Local")
@@ -388,12 +460,12 @@ struct MonGARSTests {
         #expect(MLXModelPreset.preset(for: "mlx-community/not-registered") == nil)
     }
 
-    @Test func mlxProviderBlocksFirstLoadWhenNetworkIsDisabled() async throws {
+    @Test func mlxProviderBlocksUncachedFirstLoadWhenNetworkIsDisabled() async throws {
         guard MLXLocalProvider.isLinked else {
             return
         }
 
-        let provider = MLXLocalProvider(modelID: "mlx-community/Qwen3-0.6B-4bit", maxTokens: 64, temperature: 0.2, allowsModelDownload: false)
+        let provider = MLXLocalProvider(modelID: "mlx-community/monGARS-nonexistent-uncached-model", maxTokens: 64, temperature: 0.2, allowsModelDownload: false)
         do {
             _ = try await provider.complete(request: LLMRequest(prompt: "Reply ok", conversationContext: [], retrievedContext: []))
             #expect(Bool(false), "MLX first-load must not run while network access is disabled.")
@@ -1045,6 +1117,27 @@ struct MonGARSTests {
         #expect(run.statusRawValue == AgentRunStatus.failed.rawValue)
         #expect(run.currentPhase == AgentPhase.respond.rawValue)
         #expect(run.lastError?.contains("model response") == true)
+        #expect(memories.isEmpty)
+        #expect(!traces.contains { $0.phase == AgentPhase.saveMemory.rawValue })
+    }
+
+    @Test func runtimeSavesExplicitIntroductionAfterSuccessfulResponse() async throws {
+        let (container, context) = makeContext()
+
+        for try await _ in container.agentRuntime.run(
+            goal: "Hi, I’m Alexis. How are you?",
+            conversationID: nil,
+            messages: [],
+            provider: ScriptedLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {}
+
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+        let memories = try context.fetch(FetchDescriptor<MemoryRecord>())
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+
+        #expect(run.statusRawValue == AgentRunStatus.completed.rawValue)
         #expect(memories.contains { $0.content == "User name is Alexis" })
         #expect(traces.contains { $0.phase == AgentPhase.saveMemory.rawValue && $0.message.contains("User name is Alexis") })
     }

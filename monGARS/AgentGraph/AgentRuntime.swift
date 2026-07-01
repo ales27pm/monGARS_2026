@@ -21,25 +21,29 @@ struct AgentPlanner: Sendable {
         return AgentPlan(
             summary: "Plan for: \(goal)",
             steps: steps,
-            shouldRemember: hasExplicitDurableFact || lower.contains("remember") || lower.contains("key point") || lower.contains("prefer")
+            shouldRemember: hasExplicitDurableFact || lower.contains("remember") || lower.contains("key point")
         )
     }
 }
 
 enum DurableFactExtractor {
+    private static let explicitNameRegex = try? NSRegularExpression(pattern: #"(?i)\bmy\s+name\s+is\s+([^.!?,\n]+)"#)
+    private static let introductionRegex = try? NSRegularExpression(pattern: #"(?i)(?:^|[.!?]\s*|\b(?:hi|hello|hey|bonjour|salut)\b,?\s*)i(?:\s+am|'m|’m)\s+([^.!?,\n]+)"#)
+
     static func memoryContent(from input: String) -> String? {
-        if let name = capturedValue(in: input, pattern: #"(?i)\bmy\s+name\s+is\s+([^.!?,\n]+)"#) {
+        if let name = capturedValue(in: input, regex: explicitNameRegex),
+           looksLikeName(name) {
             return "User name is \(name)"
         }
-        if let name = capturedValue(in: input, pattern: #"(?i)(?:^|[.!?]\s*|\b(?:hi|hello|hey|bonjour|salut)\b,?\s*)i(?:\s+am|'m|’m)\s+([^.!?,\n]+)"#),
+        if let name = capturedValue(in: input, regex: introductionRegex),
            looksLikeName(name) {
             return "User name is \(name)"
         }
         return nil
     }
 
-    private static func capturedValue(in input: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    private static func capturedValue(in input: String, regex: NSRegularExpression?) -> String? {
+        guard let regex else { return nil }
         let range = NSRange(input.startIndex..<input.endIndex, in: input)
         guard let match = regex.firstMatch(in: input, range: range),
               match.numberOfRanges > 1,
@@ -469,7 +473,7 @@ struct AgentLoop: Sendable {
             state.selectedToolName = tool?.name
             try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
                 if routeDecision.abstained {
-                    return "No tool required."
+                    return "No tool selected. \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
                 }
                 return routeDecision.toolName.map { "Selected tool: \($0). \(routeDecision.anchoredJustification)" } ?? "No tool required."
             }
@@ -531,16 +535,9 @@ struct AgentLoop: Sendable {
             try await runPhase(.reflect, state: &state, runRecord: runRecord, context: context, continuation: continuation) { reflectionMessage }
         }
 
-        let canSaveBeforeResponse = DurableFactExtractor.memoryContent(from: goal) != nil || state.toolResults.last?.isEmpty == false
-        if canSaveBeforeResponse, state.plan?.shouldRemember == true, state.selectedToolName != "memory_save", needsPhase(.saveMemory, state: state) {
-            let memory = durableMemory(from: goal, state: state)
-            try contextBuilder.memoryService.save(content: memory, source: "agentRun:\(state.runID.uuidString)", scope: "longTerm", context: context)
-            try await runPhase(.saveMemory, state: &state, runRecord: runRecord, context: context, continuation: continuation) { "Saved memory: \(memory)" }
-        }
-
         contextPackage = try contextBuilder.build(goal: goal, messages: messages, graphState: state, toolResults: state.toolResults, context: context, phase: .respond, budget: provider.capabilities.maxContextTokens)
         if needsPhase(.respond, state: state) {
-            markPhaseStarted(.respond, state: &state, runRecord: runRecord, context: context)
+            try markPhaseStarted(.respond, state: &state, runRecord: runRecord, context: context)
             if Date().timeIntervalSince(startedAt) > options.timeoutSeconds { throw AgentRuntimeError.timedOut }
             let response = try await responseText(goal: goal, state: state, provider: provider, contextPackage: contextPackage)
             var accumulated = ""
@@ -595,12 +592,12 @@ struct AgentLoop: Sendable {
         continuation.yield(.trace(runID: state.runID, phase: phase, message: text))
     }
 
-    private func markPhaseStarted(_ phase: AgentPhase, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext) {
+    private func markPhaseStarted(_ phase: AgentPhase, state: inout AgentLoopState, runRecord: AgentRunRecord, context: ModelContext) throws {
         state.phase = phase
         runRecord.currentPhase = phase.rawValue
         runRecord.updatedAt = .now
-        try? recordCheckpoint(state: state, nodeID: "\(phase.rawValue)-started", context: context, includeStateData: true)
-        try? context.safeSave()
+        try recordCheckpoint(state: state, nodeID: "\(phase.rawValue)-started", context: context, includeStateData: true)
+        try context.safeSave()
     }
 
     private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext, includeStateData: Bool) throws {
