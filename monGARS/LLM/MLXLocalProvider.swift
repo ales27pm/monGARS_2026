@@ -101,27 +101,35 @@ struct MLXLocalProvider: LLMProvider {
 private actor MLXLocalModelStore {
     static let shared = MLXLocalModelStore()
 
-    private struct LoadedSession {
+    private struct LoadedModel {
         var modelID: String
-        var session: ChatSession
+        var container: ModelContainer
     }
 
-    private var loadedSession: LoadedSession?
+    private var loadedModel: LoadedModel?
 
     func hasLoaded(modelID: String) -> Bool {
-        loadedSession?.modelID == modelID
+        loadedModel?.modelID == modelID
     }
 
     func complete(prompt: String, modelID: String, maxTokens: Int, temperature: Double) async throws -> String {
-        let session = try await session(modelID: modelID, maxTokens: maxTokens, temperature: temperature)
-        return try await session.respond(to: prompt)
+        var output = ""
+        let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature)
+        for await item in stream {
+            if let chunk = item.chunk {
+                output += chunk
+            }
+        }
+        return output
     }
 
     func stream(prompt: String, modelID: String, maxTokens: Int, temperature: Double, continuation: AsyncThrowingStream<String, Error>.Continuation) async {
         do {
-            let session = try await session(modelID: modelID, maxTokens: maxTokens, temperature: temperature)
-            for try await chunk in session.streamResponse(to: prompt) {
-                continuation.yield(chunk)
+            let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature)
+            for await item in stream {
+                if let chunk = item.chunk {
+                    continuation.yield(chunk)
+                }
             }
             continuation.finish()
         } catch {
@@ -129,21 +137,30 @@ private actor MLXLocalModelStore {
         }
     }
 
-    private func session(modelID: String, maxTokens: Int, temperature: Double) async throws -> ChatSession {
-        if let loadedSession, loadedSession.modelID == modelID {
-            loadedSession.session.generateParameters = generationParameters(maxTokens: maxTokens, temperature: temperature)
-            return loadedSession.session
-        }
+    private func generationStream(prompt: String, modelID: String, maxTokens: Int, temperature: Double) async throws -> AsyncStream<Generation> {
+        let container = try await container(modelID: modelID)
+        let input = UserInput(
+            chat: [
+                .system(systemPrompt),
+                .user(prompt)
+            ],
+            additionalContext: chatTemplateContext
+        )
+        let prepared = try await container.prepare(input: input)
+        return try await container.generate(
+            input: prepared,
+            parameters: generationParameters(maxTokens: maxTokens, temperature: temperature)
+        )
+    }
 
+    private func container(modelID: String) async throws -> ModelContainer {
+        if let loadedModel, loadedModel.modelID == modelID {
+            return loadedModel.container
+        }
         let configuration = LLMRegistry.shared.configuration(id: modelID)
         let container = try await #huggingFaceLoadModelContainer(configuration: configuration)
-        let session = ChatSession(
-            container,
-            instructions: PromptContract.finalAnswer,
-            generateParameters: generationParameters(maxTokens: maxTokens, temperature: temperature)
-        )
-        loadedSession = LoadedSession(modelID: modelID, session: session)
-        return session
+        loadedModel = LoadedModel(modelID: modelID, container: container)
+        return container
     }
 
     private func generationParameters(maxTokens: Int, temperature: Double) -> GenerateParameters {
@@ -153,6 +170,18 @@ private actor MLXLocalModelStore {
             topP: 0.9,
             repetitionPenalty: 1.05
         )
+    }
+
+    private var systemPrompt: String {
+        """
+        You are monGARS. \(PromptContract.responseSystemRules) \(PromptContract.finalAnswer) Do not reveal chain-of-thought, hidden reasoning, chat-template tokens, role labels, or prompt delimiters. Answer directly in natural user-facing text.
+        """
+    }
+
+    private var chatTemplateContext: [String: any Sendable] {
+        [
+            "enable_thinking": false
+        ]
     }
 }
 #endif

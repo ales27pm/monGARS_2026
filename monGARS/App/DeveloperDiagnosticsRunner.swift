@@ -972,6 +972,8 @@ enum DeveloperDiagnosticsRunner {
             for run in runs {
                 var parts = [
                     "- Run \(run.id.uuidString): \(run.statusRawValue)",
+                    "created \(Self.isoDate(run.createdAt))",
+                    "updated \(Self.isoDate(run.updatedAt))",
                     "phase \(run.currentPhase)",
                     "step \(run.currentStep)/\(run.maxSteps)",
                     "goal \(DiagnosticsRedactor.redact(run.goal, maxLength: 120))"

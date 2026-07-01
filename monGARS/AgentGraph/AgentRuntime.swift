@@ -468,24 +468,11 @@ struct AgentLoop: Sendable {
         if needsPhase(.selectTool, state: state) {
             state.selectedToolName = tool?.name
             try await runPhase(.selectTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) {
-                if routeDecision.abstained, isNoToolRoute(routeDecision) {
-                    return "No tool required."
-                }
                 if routeDecision.abstained {
-                    return "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
+                    return "No tool required."
                 }
                 return routeDecision.toolName.map { "Selected tool: \($0). \(routeDecision.anchoredJustification)" } ?? "No tool required."
             }
-        }
-
-        if routeDecision.abstained, !isNoToolRoute(routeDecision), needsPhase(.executeTool, state: state) {
-            let message = "No safe tool selected: \(routeDecision.abstentionReason ?? routeDecision.anchoredJustification)"
-            state.toolResults.append(message)
-            try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { message }
-            let observation = observer.observe(toolResult: nil, retrievedContext: state.retrievedContext)
-            let observationMessage = "\(message) \(observation)"
-            state.observations.append(observationMessage)
-            try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observationMessage }
         }
 
         if let tool, needsPhase(.executeTool, state: state) {
@@ -752,13 +739,6 @@ struct AgentLoop: Sendable {
         ToolApprovalPolicy.requiresApproval(tool: tool, autonomyLevel: autonomyLevel)
     }
 
-    private func isNoToolRoute(_ decision: ToolRouteDecision) -> Bool {
-        decision.abstained
-            && decision.competingToolName == nil
-            && decision.competingConfidence == nil
-            && decision.anchoredJustification.localizedCaseInsensitiveContains("No registered tool matched")
-    }
-
     private func finishFailure(_ status: AgentRunStatus, state: AgentLoopState, runRecord: AgentRunRecord, context: ModelContext, continuation: AsyncThrowingStream<AgentRuntimeEvent, Error>.Continuation) {
         runRecord.statusRawValue = status.rawValue
         runRecord.lastError = error(for: status).localizedDescription
@@ -837,7 +817,10 @@ enum UserFacingResponseSanitizer {
             #"(?im)^\s*(current phase|graph state|final answer contract|system rules|tool results)\s*:"#,
             #"(?im)^\s*\*\*(assistant reflection|final decision|output formatting)\s*:\*\*"#,
             #"(?im)^\s*(assistant reflection|final decision|output formatting)\s*:"#,
-            #"(?im)^\s*(begin|end) untrusted\b"#
+            #"(?im)^\s*(begin|end) untrusted\b"#,
+            #"(?im)^\s*</?think>\s*$"#,
+            #"(?im)^\s*<\|[^>\n]+?\|>\s*"#,
+            #"(?im)^\s*(human|assistant|system|developer)\s*:"#
         ]
         return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }

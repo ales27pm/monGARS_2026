@@ -370,6 +370,24 @@ struct MonGARSTests {
         #expect(status.contains("MLX Swift LM"))
     }
 
+    @Test func mlxModelPresetCatalogHasUsableChoices() {
+        #expect(MLXModelPreset.all.count >= 8)
+        #expect(MLXModelPreset.default.id == "mlx-community/Qwen3-0.6B-4bit")
+        #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/Llama-3.2-3B-Instruct-4bit" })
+        #expect(MLXModelPreset.all.contains { $0.id == "mlx-community/gemma-3n-E2B-it-lm-4bit" })
+
+        let ids = MLXModelPreset.all.map(\.id)
+        #expect(Set(ids).count == ids.count)
+        #expect(ids.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+    }
+
+    @Test func mlxModelPresetLookupAcceptsTrimmedModelID() {
+        let preset = MLXModelPreset.preset(for: "  mlx-community/Qwen3-1.7B-4bit\n")
+
+        #expect(preset?.name == "Qwen3 1.7B")
+        #expect(MLXModelPreset.preset(for: "mlx-community/not-registered") == nil)
+    }
+
     @Test func mlxProviderBlocksFirstLoadWhenNetworkIsDisabled() async throws {
         guard MLXLocalProvider.isLinked else {
             return
@@ -1824,6 +1842,28 @@ struct MonGARSTests {
 
         let safe = try UserFacingResponseSanitizer.sanitizeModelResponse("A current phase: planning note can be discussed as plain prose.")
         #expect(safe.contains("current phase"))
+    }
+
+    @Test func userFacingResponseSanitizerRejectsMLXThinkingAndChatTemplateLeak() throws {
+        let raw = """
+        <think>
+        Okay, let's see. The user wants me to return exactly "ok" as the answer.
+        </think>
+        <|endoftext|>Human: Please respond with exactly: ok
+        Assistant: system
+        """
+
+        do {
+            _ = try UserFacingResponseSanitizer.sanitizeModelResponse(raw)
+            #expect(Bool(false), "MLX reasoning and chat-template tokens must not reach users.")
+        } catch LLMProviderError.unavailable(let reason) {
+            #expect(reason.contains("model response did not contain user-visible content"))
+        }
+    }
+
+    @Test func userFacingResponseSanitizerAllowsOrdinaryRoleWordsInline() throws {
+        let safe = try UserFacingResponseSanitizer.sanitizeModelResponse("The assistant can help search for recipes after you choose a source.")
+        #expect(safe.contains("assistant can help"))
     }
 }
 

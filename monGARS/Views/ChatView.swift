@@ -475,11 +475,14 @@ struct MessageBubble: View {
 
     private var bubble: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let status = message.statusText, message.role == .assistant {
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                if let status = message.statusText, message.role == .assistant {
+                    Text(status)
+                }
+                Text(message.createdAt.formatted(date: .abbreviated, time: .shortened))
             }
+                    .font(.caption)
+                    .foregroundColor(message.role == .user ? Color.white.opacity(0.75) : Color.secondary)
             Text(message.content.isEmpty ? "Thinking..." : message.content)
         }
             .padding(12)
