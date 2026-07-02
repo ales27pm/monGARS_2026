@@ -106,6 +106,15 @@ struct ModelsView: View {
                 }
             }
 
+            if container.settingsStore.providerMode == .foundation {
+                Section("Foundation Models") {
+                    Toggle("Enable Apple Foundation Models", isOn: foundationModelsEnabled)
+                    Text("Requires this explicit toggle before Apple's on-device model can load.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Remote Model Settings") {
                 Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 Toggle("Allow localhost and private LAN hosts", isOn: developerModeEnabled)
@@ -250,6 +259,17 @@ struct ModelsView: View {
             container.settingsStore.providerMode
         } set: { value in
             container.settingsStore.providerMode = value
+            Task {
+                container.diagnostics.providerStatus = await container.llmProvider().status
+            }
+        }
+    }
+
+    private var foundationModelsEnabled: Binding<Bool> {
+        Binding {
+            container.settingsStore.foundationModelsEnabled
+        } set: { value in
+            container.settingsStore.foundationModelsEnabled = value
             Task {
                 container.diagnostics.providerStatus = await container.llmProvider().status
             }

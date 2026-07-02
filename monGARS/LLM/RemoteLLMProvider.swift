@@ -36,7 +36,7 @@ struct RemoteLLMProvider: LLMProvider {
 
     func stream(request: LLMRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task.detached {
                 do {
                     guard isEnabled else { throw LLMProviderError.remoteDisabled }
                     guard let url = URL(string: endpoint) else { throw LLMProviderError.invalidEndpoint }
@@ -58,6 +58,9 @@ struct RemoteLLMProvider: LLMProvider {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }

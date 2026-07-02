@@ -6,9 +6,13 @@ import Foundation
 struct FoundationModelProvider: LLMProvider {
     let name = "Apple Foundation Models"
     let capabilities = LLMProviderCapabilities.foundationLocal
+    var isEnabled: Bool
 
     var status: String {
         get async {
+            guard isEnabled else {
+                return "FoundationModels disabled. Select Foundation Models explicitly before loading Apple's on-device model."
+            }
 #if canImport(FoundationModels)
             if #available(iOS 26.0, macOS 26.0, *) {
                 return "FoundationModels framework available; on-device provider required"
@@ -19,6 +23,9 @@ struct FoundationModelProvider: LLMProvider {
     }
 
     func complete(request: LLMRequest) async throws -> LLMResponse {
+        guard isEnabled else {
+            throw LLMProviderError.unavailable("FoundationModels is disabled to avoid implicit Apple on-device model loading. Select Foundation Models explicitly before using this provider.")
+        }
 #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, *) {
             let session = LanguageModelSession()

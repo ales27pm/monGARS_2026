@@ -96,6 +96,15 @@ struct SettingsView: View {
                 }
             }
 
+            if container.settingsStore.providerMode == .foundation {
+                Section("Foundation Models") {
+                    Toggle("Enable Apple Foundation Models", isOn: foundationModelsEnabled)
+                    Text("Requires this explicit toggle before Apple's on-device model can load.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Network") {
                 Toggle("Enable network provider and tools", isOn: remoteProviderEnabled)
                 LabeledContent("Timeout") {
@@ -298,6 +307,14 @@ struct SettingsView: View {
         }
     }
 
+    private var foundationModelsEnabled: Binding<Bool> {
+        Binding {
+            container.settingsStore.foundationModelsEnabled
+        } set: { value in
+            container.settingsStore.foundationModelsEnabled = value
+        }
+    }
+
     private var remoteProviderEnabled: Binding<Bool> {
         Binding {
             container.settingsStore.remoteProviderEnabled
@@ -434,7 +451,7 @@ struct SettingsView: View {
         connectionTestStatus = "Testing remote endpoint..."
         do {
             let provider = container.llmProvider()
-            let response = try await provider.complete(request: LLMRequest(prompt: "Reply with: ok", conversationContext: [], retrievedContext: []))
+            let response = try await provider.completeDetached(request: LLMRequest(prompt: "Reply with: ok", conversationContext: [], retrievedContext: []))
             connectionTestStatus = "Remote connection succeeded: \(response.text.prefix(80))"
             container.diagnostics.providerStatus = await provider.status
         } catch {
@@ -446,7 +463,7 @@ struct SettingsView: View {
         connectionTestStatus = "Testing MLX local model..."
         do {
             let provider = container.llmProvider()
-            let response = try await provider.complete(request: LLMRequest(prompt: "Reply with exactly: ok", conversationContext: [], retrievedContext: []))
+            let response = try await provider.completeDetached(request: LLMRequest(prompt: "Reply with exactly: ok", conversationContext: [], retrievedContext: []))
             connectionTestStatus = "MLX local model responded: \(response.text.prefix(80))"
             container.diagnostics.providerStatus = await provider.status
         } catch {

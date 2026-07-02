@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 @Observable
@@ -18,6 +21,7 @@ final class AppContainer {
 
     var diagnostics = DiagnosticsStore()
     private(set) var persistenceRecoveryMessage: String?
+    @ObservationIgnored private var memoryWarningObserver: NSObjectProtocol?
 
     init(inMemory: Bool = false) {
         let schema = Schema(Self.schemaModels)
@@ -46,7 +50,7 @@ final class AppContainer {
         do {
             _ = try AgentRunRecoveryService.recoverStaleRunningRuns(
                 context: startupContext,
-                staleAfterSeconds: max(settingsStore.networkTimeoutSeconds * 2, 120)
+                staleAfterSeconds: Self.staleRunRecoveryGraceSeconds(timeoutSeconds: settingsStore.networkTimeoutSeconds)
             )
         } catch {
             diagnostics.lastError = "Could not recover stale agent runs: \(error.localizedDescription)"
@@ -54,16 +58,27 @@ final class AppContainer {
         if diagnostics.lastError == nil {
             diagnostics.lastError = persistenceRecoveryMessage
         }
+        installMemoryPressureHandlers()
+    }
+
+    deinit {
+        if let memoryWarningObserver {
+            NotificationCenter.default.removeObserver(memoryWarningObserver)
+        }
     }
 
     static var schemaModels: [any PersistentModel.Type] {
         MonGARSSchemaV2.models
     }
 
+    static func staleRunRecoveryGraceSeconds(timeoutSeconds: TimeInterval) -> TimeInterval {
+        max(timeoutSeconds * 2, 30)
+    }
+
     func llmProvider() -> any LLMProvider {
         switch settingsStore.providerMode {
         case .foundation:
-            return FoundationModelProvider()
+            return FoundationModelProvider(isEnabled: settingsStore.foundationModelsEnabled)
         case .mlx:
             return MLXLocalProvider(
                 modelID: settingsStore.mlxModelID,
@@ -80,6 +95,23 @@ final class AppContainer {
                 client: AppNetworkConfiguration.client()
             )
         }
+    }
+
+    private func installMemoryPressureHandlers() {
+        #if canImport(UIKit)
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task {
+                await MLXLocalProvider.releaseCachedModel(reason: "iOS memory warning")
+            }
+            Task { @MainActor [weak self] in
+                self?.diagnostics.lastError = "iOS memory warning received; released cached MLX model."
+            }
+        }
+        #endif
     }
 
     func seedIfNeeded(context: ModelContext) {

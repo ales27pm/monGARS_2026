@@ -125,9 +125,20 @@ protocol LLMProvider: Sendable {
 }
 
 extension LLMProvider {
+    func completeDetached(request: LLMRequest) async throws -> LLMResponse {
+        let task = Task.detached {
+            try await complete(request: request)
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     func stream(request: LLMRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task.detached {
                 do {
                     let response = try await complete(request: request)
                     let words = response.text.split(separator: " ").map(String.init)
@@ -139,6 +150,9 @@ extension LLMProvider {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }

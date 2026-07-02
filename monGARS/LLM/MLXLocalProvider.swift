@@ -2,6 +2,7 @@ import Foundation
 
 #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
 import HuggingFace
+import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
@@ -28,6 +29,8 @@ struct MLXLocalProvider: LLMProvider {
         isLinked ? "linked" : "not linked"
     }
 
+    static let cacheResidencyPolicy = "release loaded model and clear MLX allocator cache after prepare, completion, stream termination, cancellation, error, or iOS memory warning"
+
     var status: String {
         get async {
 #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
@@ -51,17 +54,29 @@ struct MLXLocalProvider: LLMProvider {
 #endif
     }
 
+    static func releaseCachedModel(reason: String = "manual release") async {
+#if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
+        await MLXLocalModelStore.shared.releaseLoadedModel(reason: reason)
+#endif
+    }
+
     func complete(request: LLMRequest) async throws -> LLMResponse {
 #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(MLXHuggingFace) && canImport(HuggingFace) && canImport(Tokenizers)
         let prompt = LLMPromptAssembler.assemble(request: request)
         let modelID = Self.normalizedModelID(modelID)
-        let text = try await MLXLocalModelStore.shared.complete(
-            prompt: prompt,
-            modelID: modelID,
-            maxTokens: maxTokens,
-            temperature: temperature,
-            allowsModelDownload: allowsModelDownload
-        )
+        let text: String
+        do {
+            text = try await MLXLocalModelStore.shared.complete(
+                prompt: prompt,
+                modelID: modelID,
+                maxTokens: maxTokens,
+                temperature: temperature,
+                allowsModelDownload: allowsModelDownload
+            )
+        } catch {
+            await Self.releaseCachedModel(reason: "failed MLX completion")
+            throw error
+        }
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else {
             throw LLMProviderError.unavailable("MLX generated an empty response.")
@@ -77,7 +92,7 @@ struct MLXLocalProvider: LLMProvider {
         let prompt = LLMPromptAssembler.assemble(request: request)
         let modelID = Self.normalizedModelID(modelID)
         return AsyncThrowingStream { continuation in
-            let task = Task {
+            let task = Task.detached {
                 await MLXLocalModelStore.shared.stream(
                     prompt: prompt,
                     modelID: modelID,
@@ -89,6 +104,9 @@ struct MLXLocalProvider: LLMProvider {
             }
             continuation.onTermination = { _ in
                 task.cancel()
+                Task {
+                    await Self.releaseCachedModel(reason: "terminated MLX stream")
+                }
             }
         }
 #else
@@ -116,22 +134,41 @@ private actor MLXLocalModelStore {
     private var loadedModel: LoadedModel?
 
     func prepare(modelID: String, allowsModelDownload: Bool) async throws {
+        defer {
+            releaseLoadedModel(reason: "completed MLX prepare")
+        }
         _ = try await container(modelID: modelID, allowsModelDownload: allowsModelDownload)
     }
 
+    func releaseLoadedModel(reason: String) {
+        loadedModel = nil
+        Memory.clearCache()
+    }
+
     func complete(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool) async throws -> String {
-        var output = ""
-        let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature, allowsModelDownload: allowsModelDownload)
-        for await item in stream {
-            try Task.checkCancellation()
-            if let chunk = item.chunk {
-                output += chunk
-            }
+        defer {
+            releaseLoadedModel(reason: "completed MLX completion scope")
         }
-        return output
+        var output = ""
+        do {
+            let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature, allowsModelDownload: allowsModelDownload)
+            for await item in stream {
+                try Task.checkCancellation()
+                if let chunk = item.chunk {
+                    output += chunk
+                }
+            }
+            return output
+        } catch is CancellationError {
+            releaseLoadedModel(reason: "cancelled MLX completion")
+            throw CancellationError()
+        }
     }
 
     func stream(prompt: String, modelID: String, maxTokens: Int, temperature: Double, allowsModelDownload: Bool, continuation: AsyncThrowingStream<String, Error>.Continuation) async {
+        defer {
+            releaseLoadedModel(reason: "completed MLX stream scope")
+        }
         do {
             let stream = try await generationStream(prompt: prompt, modelID: modelID, maxTokens: maxTokens, temperature: temperature, allowsModelDownload: allowsModelDownload)
             for await item in stream {
@@ -141,6 +178,9 @@ private actor MLXLocalModelStore {
                 }
             }
             continuation.finish()
+        } catch is CancellationError {
+            releaseLoadedModel(reason: "cancelled MLX stream")
+            continuation.finish(throwing: CancellationError())
         } catch {
             continuation.finish(throwing: error)
         }

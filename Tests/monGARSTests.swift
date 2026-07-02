@@ -166,6 +166,29 @@ struct MonGARSTests {
         #expect(store.toolCalls.first?.output.contains("secret body") == false)
     }
 
+    @Test func diagnosticsStoreBoundsLiveEntries() {
+        let store = DiagnosticsStore()
+        let runID = UUID()
+
+        for index in 0..<(DiagnosticsStore.graphStepLimit + 5) {
+            store.record(event: .step("step-\(index)"))
+        }
+        for index in 0..<(DiagnosticsStore.liveToolCallLimit + 5) {
+            store.record(event: .toolCall(tool: "tool-\(index)", input: "input-\(index)", output: "output-\(index)"))
+        }
+        for index in 0..<(DiagnosticsStore.checkpointLimit + 5) {
+            let state = AgentState(runID: runID, userInput: "input-\(index)", currentNodeID: "node-\(index)")
+            store.record(event: .checkpoint(AgentCheckpoint(runID: runID, nodeID: "node-\(index)", summary: "summary-\(index)", state: state)))
+        }
+
+        #expect(store.graphSteps.count == DiagnosticsStore.graphStepLimit)
+        #expect(store.graphSteps.first == "step-5")
+        #expect(store.toolCalls.count == DiagnosticsStore.liveToolCallLimit)
+        #expect(store.toolCalls.first?.toolName == "tool-5")
+        #expect(store.checkpoints.count == DiagnosticsStore.checkpointLimit)
+        #expect(store.checkpoints.first?.contains("node-5") == true)
+    }
+
     @Test func memorySearchFindsSavedFacts() throws {
         let (container, context) = makeContext()
         try container.memoryService.save(content: "My preferred city is Montreal.", context: context)
@@ -400,7 +423,7 @@ struct MonGARSTests {
 
     @Test func resetNetworkConfigurationPreservesMLXLocalPreferences() {
         let defaults = UserDefaults.standard
-        let keys = ["mlxModelID", "mlxMaxTokens", "mlxTemperature"]
+        let keys = ["mlxModelID", "mlxMaxTokens", "mlxTemperature", "foundationModelsEnabled"]
         var previousValues: [String: Any] = [:]
         for key in keys {
             previousValues[key] = defaults.object(forKey: key)
@@ -419,12 +442,126 @@ struct MonGARSTests {
         store.mlxModelID = "mlx-community/Qwen3-1.7B-4bit"
         store.mlxMaxTokens = 1024
         store.mlxTemperature = 0.0
+        store.foundationModelsEnabled = true
 
         store.resetNetworkConfiguration()
 
         #expect(store.mlxModelID == "mlx-community/Qwen3-1.7B-4bit")
         #expect(store.mlxMaxTokens == 1024)
         #expect(store.mlxTemperature == 0.0)
+        #expect(store.foundationModelsEnabled == false)
+    }
+
+    @Test func cleanSettingsDefaultToMLXAndKeepFoundationModelsOptInOff() {
+        let defaults = UserDefaults.standard
+        let keys = ["providerMode", "foundationModelsEnabled"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+            defaults.removeObject(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        let store = SettingsStore()
+
+        #expect(store.providerMode == .mlx)
+        #expect(store.foundationModelsEnabled == false)
+    }
+
+    @Test func invalidPersistedProviderModeFallsBackAwayFromFoundationModels() {
+        let defaults = UserDefaults.standard
+        let keys = ["providerMode", "foundationModelsEnabled"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+        }
+        defaults.set("unknown-provider", forKey: "providerMode")
+        defaults.set(true, forKey: "foundationModelsEnabled")
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        let store = SettingsStore()
+
+        #expect(store.providerMode == .mlx)
+        #expect(store.foundationModelsEnabled == false)
+    }
+
+    @Test func leavingFoundationModeClearsFoundationModelsOptIn() {
+        let defaults = UserDefaults.standard
+        let keys = ["providerMode", "foundationModelsEnabled"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        defaults.set(ProviderMode.foundation.rawValue, forKey: "providerMode")
+        defaults.set(true, forKey: "foundationModelsEnabled")
+        let store = SettingsStore()
+
+        #expect(store.providerMode == .foundation)
+        #expect(store.foundationModelsEnabled)
+
+        store.providerMode = .mlx
+
+        #expect(store.providerMode == .mlx)
+        #expect(store.foundationModelsEnabled == false)
+        #expect(defaults.bool(forKey: "foundationModelsEnabled") == false)
+    }
+
+    @Test func persistedFoundationModeDoesNotLoadAppleModelWithoutExplicitOptIn() async throws {
+        let defaults = UserDefaults.standard
+        let keys = ["providerMode", "foundationModelsEnabled"]
+        var previousValues: [String: Any] = [:]
+        for key in keys {
+            previousValues[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = previousValues[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+
+        defaults.set(ProviderMode.foundation.rawValue, forKey: "providerMode")
+        defaults.set(false, forKey: "foundationModelsEnabled")
+        let store = SettingsStore()
+        let provider = FoundationModelProvider(isEnabled: store.foundationModelsEnabled)
+
+        #expect(store.providerMode == .foundation)
+        #expect(store.foundationModelsEnabled == false)
+        do {
+            _ = try await provider.complete(request: LLMRequest(prompt: "Hi", conversationContext: [], retrievedContext: []))
+            #expect(Bool(false), "Foundation Models must fail before constructing LanguageModelSession unless explicitly enabled.")
+        } catch LLMProviderError.unavailable(let reason) {
+            #expect(reason.contains("disabled"))
+        }
     }
 
     @Test func mlxProviderModeIsRealLocalProviderWithoutNetworkGate() async {
@@ -560,6 +697,8 @@ struct MonGARSTests {
             ("map nearest coffee shop", "maps_lookup"),
             ("open webview https://example.com", "integrated_webview"),
             ("fetch https://example.com", "web_fetch"),
+            ("Search web", "web_fetch"),
+            ("Search https://lapresse.ca for \"luc Bordeleau\"", "web_fetch"),
             ("write file note.txt content hello", "local_file")
         ]
 
@@ -769,6 +908,37 @@ struct MonGARSTests {
         #expect(result.outcome == .blocked)
         #expect(result.output.contains("blocked"))
         #expect(ToolHandoffAction.actions(from: "Approved in-app webview navigation prepared: http://localhost:8080.").isEmpty)
+    }
+
+    @Test func webFetchRejectsMissingURLBeforeApprovalOrNetwork() async throws {
+        let (_, context) = makeContext()
+
+        let result = try await WebFetchTool().execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "Search web", autonomyLevel: .auto, approved: false, networkAccessAllowed: false),
+            context: context
+        )
+
+        #expect(result.toolName == "web_fetch")
+        #expect(result.outcome == .needsInput)
+        #expect(result.errorCategory == "invalid_arguments")
+        #expect(result.requiresApproval == false)
+        #expect(result.output.contains("Provide an http or https URL"))
+    }
+
+    @Test func webFetchRejectsUnsupportedSiteSearchBeforeApprovalOrNetwork() async throws {
+        let (_, context) = makeContext()
+
+        let result = try await WebFetchTool().execute(
+            request: ToolExecutionRequest(runID: UUID(), input: "Search https://lapresse.ca for \"luc Bordeleau\"", autonomyLevel: .auto, approved: false, networkAccessAllowed: false),
+            context: context
+        )
+
+        #expect(result.toolName == "web_fetch")
+        #expect(result.outcome == .needsInput)
+        #expect(result.errorCategory == "invalid_arguments")
+        #expect(result.requiresApproval == false)
+        #expect(result.target == "lapresse.ca")
+        #expect(result.output.contains("not supported by web_fetch"))
     }
 
     @Test func contactsLookupRejectsEmptyQueryBeforeEnumeration() async throws {
@@ -1080,6 +1250,29 @@ struct MonGARSTests {
         #expect(try context.fetch(FetchDescriptor<DocumentChunkRecord>()).isEmpty)
     }
 
+    @Test func recentDocumentHelpersLimitStorageBackedResults() throws {
+        let (container, context) = makeContext()
+        let base = Date(timeIntervalSince1970: 1_000)
+        for index in 0..<5 {
+            context.insert(DocumentRecord(
+                title: "Doc-\(index).md",
+                content: "content-\(index)",
+                importedAt: base.addingTimeInterval(TimeInterval(index))
+            ))
+        }
+        try context.save()
+
+        let summaries = try container.documentService.recentDocumentSummaries(context: context, limit: 3, characterLimit: 20)
+        let matched = try container.documentService.document(titled: "Doc-2.md", context: context)
+
+        #expect(summaries.count == 3)
+        #expect(summaries[0].contains("Doc-4.md"))
+        #expect(summaries[1].contains("Doc-3.md"))
+        #expect(summaries[2].contains("Doc-2.md"))
+        #expect(summaries.contains { $0.contains("Doc-1.md") } == false)
+        #expect(matched?.title == "Doc-2.md")
+    }
+
     @Test func defaultEmbeddingProviderReportsRealStatus() {
         let provider = DefaultEmbeddingProvider()
         switch provider.status {
@@ -1203,6 +1396,70 @@ struct MonGARSTests {
         #expect(run.completedAt != nil)
     }
 
+    @Test func runtimeTimeoutCancelsUnderlyingProviderTask() async throws {
+        let (container, context) = makeContext()
+        let provider = CancellationRecordingLLMProvider()
+
+        do {
+            for try await _ in container.agentRuntime.run(
+                goal: "Hi",
+                conversationID: nil,
+                messages: [],
+                provider: provider,
+                options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 0.25),
+                context: context
+            ) {}
+            #expect(Bool(false), "A timed-out run must cancel the underlying provider task.")
+        } catch {
+            #expect(error.localizedDescription == AgentRuntimeError.timedOut.localizedDescription)
+        }
+
+        for _ in 0..<20 where !provider.wasCancelled {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        #expect(provider.didStart)
+        #expect(provider.wasCancelled)
+    }
+
+    @Test func runtimeCompletesProviderOffMainThread() async throws {
+        let (container, context) = makeContext()
+        let provider = ThreadCheckingLLMProvider()
+
+        for try await _ in container.agentRuntime.run(
+            goal: "Hi",
+            conversationID: nil,
+            messages: [],
+            provider: provider,
+            options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {}
+
+        #expect(provider.didComplete)
+        #expect(provider.completedOnMainThread == false)
+    }
+
+    @Test func providerDetachedCompletionDoesNotRunOnMainThread() async throws {
+        let provider = ThreadCheckingLLMProvider()
+        _ = try await provider.completeDetached(request: LLMRequest(prompt: "Hi", conversationContext: [], retrievedContext: []))
+
+        #expect(provider.didComplete)
+        #expect(provider.completedOnMainThread == false)
+    }
+
+    @Test func defaultProviderStreamCompletesOffMainThread() async throws {
+        let provider = ThreadCheckingLLMProvider()
+        var chunks: [String] = []
+
+        for try await chunk in provider.stream(request: LLMRequest(prompt: "Hi", conversationContext: [], retrievedContext: [])) {
+            chunks.append(chunk)
+        }
+
+        #expect(!chunks.isEmpty)
+        #expect(provider.didComplete)
+        #expect(provider.completedOnMainThread == false)
+    }
+
     @Test func runtimeSavesExplicitIntroductionAfterSuccessfulResponse() async throws {
         let (container, context) = makeContext()
 
@@ -1293,6 +1550,12 @@ struct MonGARSTests {
 
         let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
         #expect(traces.contains { $0.runID == runID && $0.message.contains("Recovered stale running run") })
+    }
+
+    @Test func appContainerUsesTimeoutBoundedStaleRunRecoveryGrace() {
+        #expect(AppContainer.staleRunRecoveryGraceSeconds(timeoutSeconds: 20) == 40)
+        #expect(AppContainer.staleRunRecoveryGraceSeconds(timeoutSeconds: 5) == 30)
+        #expect(AppContainer.staleRunRecoveryGraceSeconds(timeoutSeconds: 90) == 180)
     }
 
     @Test func pauseAndCancelPersistControlDiagnostics() throws {
@@ -1423,6 +1686,69 @@ struct MonGARSTests {
         #expect(approvals.isEmpty)
         #expect(toolCalls.first?.toolName == "web_fetch")
         #expect(toolCalls.first?.errorCategory == "network_disabled")
+    }
+
+    @Test func incompleteWebSearchCompletesThroughPreflightWithoutProviderOrApproval() async throws {
+        let (container, context) = makeContext()
+        let provider = InvocationCountingLLMProvider()
+        var completedResponse = ""
+
+        for try await event in container.agentRuntime.run(
+            goal: "Search web",
+            conversationID: nil,
+            messages: [],
+            provider: provider,
+            options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: true),
+            context: context
+        ) {
+            if case .completed(_, let response) = event {
+                completedResponse = response
+            }
+        }
+
+        let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>())
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>())
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+
+        #expect(completedResponse.contains("Provide an http or https URL"))
+        #expect(provider.completeCallCount == 0)
+        #expect(approvals.isEmpty)
+        #expect(toolCalls.first?.toolName == "web_fetch")
+        #expect(toolCalls.first?.errorCategory == "invalid_arguments")
+        #expect(traces.contains { $0.phase == AgentPhase.selectTool.rawValue && $0.message.contains("web_fetch") })
+        #expect(run.statusRawValue == AgentRunStatus.completed.rawValue)
+    }
+
+    @Test func urlSiteSearchCompletesThroughPreflightWithoutProviderOrApproval() async throws {
+        let (container, context) = makeContext()
+        let provider = InvocationCountingLLMProvider()
+        var completedResponse = ""
+
+        for try await event in container.agentRuntime.run(
+            goal: "Search https://lapresse.ca for \"luc Bordeleau\"",
+            conversationID: nil,
+            messages: [],
+            provider: provider,
+            options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: 20, networkToolsEnabled: true),
+            context: context
+        ) {
+            if case .completed(_, let response) = event {
+                completedResponse = response
+            }
+        }
+
+        let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>())
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>())
+        let run = try #require(try context.fetch(FetchDescriptor<AgentRunRecord>()).first)
+
+        #expect(completedResponse.contains("Searching lapresse.ca"))
+        #expect(completedResponse.contains("not supported by web_fetch"))
+        #expect(provider.completeCallCount == 0)
+        #expect(approvals.isEmpty)
+        #expect(toolCalls.first?.toolName == "web_fetch")
+        #expect(toolCalls.first?.errorCategory == "invalid_arguments")
+        #expect(run.statusRawValue == AgentRunStatus.completed.rawValue)
     }
 
     @Test func resumeWaitingForApprovalDoesNotDuplicateApproval() async throws {
@@ -1746,6 +2072,33 @@ struct MonGARSTests {
         #expect(allCheckpoints.contains { $0.nodeID == AgentPhase.askUser.rawValue && $0.stateData != nil })
     }
 
+    @Test func checkpointStateDataIsBoundedForLargeContext() async throws {
+        let (container, context) = makeContext()
+        let document = DocumentRecord(
+            title: "Large Context.md",
+            content: String(repeating: "large diagnostic context ", count: 3_000)
+        )
+        context.insert(document)
+        try container.documentService.rebuildChunks(for: document, context: context)
+
+        for try await _ in container.agentRuntime.run(
+            goal: "large diagnostic context",
+            conversationID: nil,
+            messages: [String(repeating: "conversation context ", count: 1_000)],
+            provider: ScriptedLLMProvider(),
+            options: AgentRuntimeOptions(autonomyLevel: .semiAuto, maxSteps: 12, timeoutSeconds: 20),
+            context: context
+        ) {}
+
+        let checkpoints = try context.fetch(FetchDescriptor<AgentCheckpointRecord>())
+        let payloads = checkpoints.compactMap(\.stateData)
+        #expect(!payloads.isEmpty)
+        #expect(payloads.allSatisfy { $0.count <= AgentLoopState.checkpointByteLimit })
+        let decoded = try #require(payloads.compactMap { try? JSONDecoder().decode(AgentLoopState.self, from: $0) }.first)
+        #expect(decoded.retrievedContext.count <= AgentLoopState.checkpointArrayLimit)
+        #expect(decoded.toolResults.count <= AgentLoopState.checkpointArrayLimit)
+    }
+
     @Test func telemetryBufferDefersToolCallPersistenceUntilFlush() throws {
         let (_, context) = makeContext()
         let buffer = AgentTelemetryBuffer()
@@ -1769,6 +2122,38 @@ struct MonGARSTests {
         #expect(afterFlush.first?.outcomeRawValue == ToolOutcome.success.rawValue)
         #expect(afterFlush.first?.statusCode == 200)
         #expect(afterFlush.first?.latencyMs == 42)
+    }
+
+    @Test func telemetryBufferBoundsStagedAndDurableRecords() throws {
+        let (_, context) = makeContext()
+        let buffer = AgentTelemetryBuffer()
+        let runID = UUID()
+
+        for index in 0..<(AgentTelemetryBuffer.stagedTraceLimit + 5) {
+            buffer.appendTrace(runID: runID, stepIndex: index, phase: "phase", message: "trace-\(index)")
+        }
+        for index in 0..<(AgentTelemetryBuffer.stagedCheckpointLimit + 5) {
+            buffer.appendCheckpoint(runID: runID, nodeID: "node-\(index)", stateSummary: "checkpoint-\(index)")
+        }
+        for index in 0..<(AgentTelemetryBuffer.stagedToolCallLimit + 5) {
+            buffer.appendToolCall(
+                runID: runID,
+                input: "input-\(index)",
+                result: ToolResult(toolName: "calculator", output: "output-\(index)")
+            )
+        }
+
+        try buffer.flush(runID: runID, to: context)
+
+        let traces = try context.fetch(FetchDescriptor<AgentTraceRecord>(sortBy: [SortDescriptor(\.createdAt)]))
+        let checkpoints = try context.fetch(FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt)]))
+        let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>(sortBy: [SortDescriptor(\.createdAt)]))
+        #expect(traces.count == AgentTelemetryBuffer.durableTraceLimit)
+        #expect(checkpoints.count == AgentTelemetryBuffer.durableCheckpointLimit)
+        #expect(toolCalls.count == AgentTelemetryBuffer.durableToolCallLimit)
+        #expect(traces.first?.message == "trace-5")
+        #expect(checkpoints.first?.stateSummary == "checkpoint-5")
+        #expect(toolCalls.first?.input == "input-5")
     }
 
     @Test func diagnosticsRedactionRemovesBodiesContactDetailsAndSecrets() throws {
@@ -1849,6 +2234,12 @@ struct MonGARSTests {
         #expect(result.text.contains("Report acceptance:"))
         #expect(result.text.contains("Outcome:"))
         #expect(result.text.contains("Security Checks"))
+        #expect(result.text.contains("Agent Runtime E2E"))
+        #expect(result.text.contains("Production LLM provider usage: false"))
+        #expect(result.text.contains("Foundation Models explicit opt-in: false"))
+        #expect(result.text.contains("Search web runtime preflight"))
+        #expect(result.text.contains("providerCalls=0"))
+        #expect(result.text.contains("error=invalid_arguments"))
         #expect(result.text.contains("Real Tool E2E"))
         #expect(result.text.contains("LLM provider usage: false"))
         #expect(result.text.contains("Tool coverage: 24/24 registry tools"))
@@ -1862,6 +2253,8 @@ struct MonGARSTests {
         #expect(result.text.contains("remote HTTP approval rejection"))
         #expect(result.text.contains("weather network-off block"))
         #expect(result.text.contains("remote HTTP network-off block"))
+        #expect(result.text.contains("web fetch missing URL before approval/network"))
+        #expect(result.text.contains("web fetch site search before approval/network"))
         #expect(result.text.contains("PDF document import and search"))
         #expect(result.text.contains("HTML extraction local"))
         #expect(result.text.contains("plain text JSON preview local"))
@@ -1872,6 +2265,14 @@ struct MonGARSTests {
         #endif
         #expect(result.text.contains("Keychain round trip: pass"))
         #expect(result.text.contains("SwiftData Counts"))
+        #expect(result.text.contains("Memory Footprint"))
+        #expect(result.text.contains("MLX cache residency policy: release loaded model and clear MLX allocator cache after prepare, completion, stream termination, cancellation, error, or iOS memory warning"))
+        #expect(result.text.contains("MLX cache release after prepare: enabled"))
+        #expect(result.text.contains("MLX cache release after completion/error: enabled"))
+        #expect(result.text.contains("MLX cache release after stream termination: enabled"))
+        #expect(result.text.contains("MLX cache release on iOS memory warning: enabled"))
+        #expect(result.text.contains("MLX cache release on cancellation: enabled"))
+        #expect(result.text.contains("MLX allocator cache clear after model release: enabled"))
         #expect(result.text.contains("Recent Diagnostics"))
         #expect(result.text.contains("Localhost policy: blocked"))
         #expect(result.text.contains("default private host policy"))
@@ -1977,7 +2378,7 @@ struct MonGARSTests {
     }
 
     @Test func foundationProviderReportsOnDeviceRequirement() async {
-        let provider = FoundationModelProvider()
+        let provider = FoundationModelProvider(isEnabled: true)
         #expect(provider.capabilities.isLocal)
         let status = await provider.status
         #expect(status.contains("FoundationModels"))
@@ -2145,6 +2546,70 @@ struct HangingLLMProvider: LLMProvider {
     }
 }
 
+final class CancellationRecordingLLMProvider: LLMProvider, @unchecked Sendable {
+    let name = "Cancellation Recording Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+    private let lock = NSLock()
+    private var didStartValue = false
+    private var wasCancelledValue = false
+
+    var status: String {
+        get async { "Cancellation recording provider ready" }
+    }
+
+    var didStart: Bool {
+        lock.withLock { didStartValue }
+    }
+
+    var wasCancelled: Bool {
+        lock.withLock { wasCancelledValue }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        lock.withLock {
+            didStartValue = true
+        }
+        do {
+            while true {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        } catch is CancellationError {
+            lock.withLock {
+                wasCancelledValue = true
+            }
+            throw CancellationError()
+        }
+    }
+}
+
+final class ThreadCheckingLLMProvider: LLMProvider, @unchecked Sendable {
+    let name = "Thread Checking Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+    private let lock = NSLock()
+    private var didCompleteValue = false
+    private var completedOnMainThreadValue: Bool?
+
+    var status: String {
+        get async { "Thread checking test provider ready" }
+    }
+
+    var didComplete: Bool {
+        lock.withLock { didCompleteValue }
+    }
+
+    var completedOnMainThread: Bool? {
+        lock.withLock { completedOnMainThreadValue }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        lock.withLock {
+            didCompleteValue = true
+            completedOnMainThreadValue = Thread.isMainThread
+        }
+        return LLMResponse(text: "off-main response", providerName: name)
+    }
+}
+
 struct InvalidModelEchoProvider: LLMProvider {
     let name = "Invalid Echo Test Provider"
     let capabilities = LLMProviderCapabilities.foundationLocal
@@ -2215,5 +2680,27 @@ final class CapturingLLMProvider: LLMProvider, @unchecked Sendable {
             storedRequest = request
         }
         return LLMResponse(text: response, providerName: name)
+    }
+}
+
+final class InvocationCountingLLMProvider: LLMProvider, @unchecked Sendable {
+    let name = "Invocation Counting Test Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+    private let lock = NSLock()
+    private var calls = 0
+
+    var status: String {
+        get async { "Invocation counting test provider ready" }
+    }
+
+    var completeCallCount: Int {
+        lock.withLock { calls }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        lock.withLock {
+            calls += 1
+        }
+        return LLMResponse(text: "Provider should not be needed for missing tool input.", providerName: name)
     }
 }

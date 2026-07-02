@@ -82,6 +82,30 @@ struct DocumentService: Sendable {
         try context.fetch(FetchDescriptor<DocumentRecord>(sortBy: [SortDescriptor(\.importedAt, order: .reverse)]))
     }
 
+    func recentDocuments(context: ModelContext, limit: Int) throws -> [DocumentRecord] {
+        guard limit > 0 else { return [] }
+        var descriptor = FetchDescriptor<DocumentRecord>(sortBy: [SortDescriptor(\.importedAt, order: .reverse)])
+        descriptor.fetchLimit = limit
+        return try context.fetch(descriptor)
+    }
+
+    func document(titled title: String, context: ModelContext) throws -> DocumentRecord? {
+        var descriptor = FetchDescriptor<DocumentRecord>(
+            predicate: #Predicate { document in
+                document.title == title
+            },
+            sortBy: [SortDescriptor(\.importedAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return try context.fetch(descriptor).first
+    }
+
+    func recentDocumentSummaries(context: ModelContext, limit: Int = 3, characterLimit: Int = 180) throws -> [String] {
+        try recentDocuments(context: context, limit: limit).map { document in
+            "\(document.title): \(document.content.prefix(characterLimit))"
+        }
+    }
+
     func rankedSnippets(matching query: String, context: ModelContext, limit: Int = 6) throws -> [DocumentRetrievalResult] {
         let terms = normalizedTerms(query)
         guard !terms.isEmpty else { return [] }
@@ -127,7 +151,12 @@ struct DocumentService: Sendable {
     }
 
     func rebuildChunks(for document: DocumentRecord, context: ModelContext) throws {
-        let existing = try context.fetch(FetchDescriptor<DocumentChunkRecord>()).filter { $0.documentID == document.id }
+        let documentID = document.id
+        let existing = try context.fetch(FetchDescriptor<DocumentChunkRecord>(
+            predicate: #Predicate { chunk in
+                chunk.documentID == documentID
+            }
+        ))
         for chunk in existing {
             context.delete(chunk)
         }
@@ -159,7 +188,12 @@ struct DocumentService: Sendable {
     }
 
     func delete(_ record: DocumentRecord, context: ModelContext) throws {
-        let chunks = try context.fetch(FetchDescriptor<DocumentChunkRecord>()).filter { $0.documentID == record.id }
+        let documentID = record.id
+        let chunks = try context.fetch(FetchDescriptor<DocumentChunkRecord>(
+            predicate: #Predicate { chunk in
+                chunk.documentID == documentID
+            }
+        ))
         for chunk in chunks {
             context.delete(chunk)
         }

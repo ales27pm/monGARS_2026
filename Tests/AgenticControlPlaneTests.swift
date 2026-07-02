@@ -23,6 +23,29 @@ struct AgenticControlPlaneTests {
         #expect(decision.anchoredJustification.contains("requires_network=true"))
     }
 
+    @Test func scoredRouterTreatsExplicitWebSearchAsWebFetchIntent() {
+        let (container, _) = makeContext()
+
+        let decision = container.toolRouter.routeDecision(input: "Search web")
+
+        #expect(decision.toolName == "web_fetch")
+        #expect(decision.confidence >= 0.55)
+        #expect(decision.requiresApproval)
+        #expect(decision.anchoredJustification.contains("search web"))
+    }
+
+    @Test func scoredRouterTreatsURLSearchAsWebFetchIntent() {
+        let (container, _) = makeContext()
+
+        let decision = container.toolRouter.routeDecision(input: "Search https://lapresse.ca for \"luc Bordeleau\"")
+
+        #expect(decision.toolName == "web_fetch")
+        #expect(decision.confidence >= 0.70)
+        #expect(decision.requiresApproval)
+        #expect(decision.anchoredJustification.contains("http_url"))
+        #expect(decision.anchoredJustification.contains("target=lapresse.ca"))
+    }
+
     @Test func scoredRouterUsesWholeKeywordMatches() {
         let (container, _) = makeContext()
 

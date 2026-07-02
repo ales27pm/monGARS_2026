@@ -196,6 +196,43 @@ private struct ToolCallSnapshot: Sendable {
     var createdAt: Date
 }
 
+extension AgentLoopState {
+    static let checkpointStringLimit = 1_200
+    static let checkpointArrayLimit = 6
+    static let checkpointByteLimit = 24_000
+
+    func checkpointSnapshot() -> AgentLoopState {
+        var snapshot = self
+        snapshot.goal = Self.truncated(goal, limit: Self.checkpointStringLimit)
+        snapshot.retrievedContext = Self.boundedStrings(retrievedContext, itemLimit: Self.checkpointArrayLimit, characterLimit: Self.checkpointStringLimit)
+        snapshot.toolResults = Self.boundedStrings(toolResults, itemLimit: Self.checkpointArrayLimit, characterLimit: Self.checkpointStringLimit)
+        snapshot.observations = Self.boundedStrings(observations, itemLimit: Self.checkpointArrayLimit, characterLimit: Self.checkpointStringLimit)
+        snapshot.reflection = Self.truncated(reflection, limit: Self.checkpointStringLimit)
+        snapshot.finalResponse = Self.truncated(finalResponse, limit: Self.checkpointStringLimit)
+        return snapshot
+    }
+
+    func compactCheckpointSnapshot() -> AgentLoopState {
+        var snapshot = checkpointSnapshot()
+        snapshot.retrievedContext = Self.boundedStrings(snapshot.retrievedContext, itemLimit: 2, characterLimit: 600)
+        snapshot.toolResults = Self.boundedStrings(snapshot.toolResults, itemLimit: 2, characterLimit: 600)
+        snapshot.observations = Self.boundedStrings(snapshot.observations, itemLimit: 2, characterLimit: 600)
+        snapshot.reflection = Self.truncated(snapshot.reflection, limit: 600)
+        snapshot.finalResponse = Self.truncated(snapshot.finalResponse, limit: 600)
+        return snapshot
+    }
+
+    private static func boundedStrings(_ values: [String], itemLimit: Int, characterLimit: Int) -> [String] {
+        values.suffix(itemLimit).map { truncated($0, limit: characterLimit) }
+    }
+
+    private static func truncated(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        let index = value.index(value.startIndex, offsetBy: limit)
+        return String(value[..<index]) + "\n[truncated]"
+    }
+}
+
 private final class AsyncTimeoutRace<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
@@ -266,47 +303,30 @@ private final class AsyncTimeoutRace<Value: Sendable>: @unchecked Sendable {
 
 final class AgentTelemetryBuffer: @unchecked Sendable {
     private let lock = NSLock()
-    private let inMemoryContainer: ModelContainer?
-    private let inMemoryContext: ModelContext?
     private var traces: [AgentTraceSnapshot] = []
     private var checkpoints: [AgentCheckpointSnapshot] = []
     private var toolCalls: [ToolCallSnapshot] = []
 
-    init() {
-        let schema = Schema([
-            AgentTraceRecord.self,
-            AgentCheckpointRecord.self,
-            ToolCallRecord.self
-        ])
-        do {
-            let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
-            inMemoryContainer = container
-            inMemoryContext = ModelContext(container)
-        } catch {
-            inMemoryContainer = nil
-            inMemoryContext = nil
-        }
-    }
+    static let stagedTraceLimit = 240
+    static let stagedCheckpointLimit = 160
+    static let stagedToolCallLimit = 100
+    static let durableTraceLimit = 240
+    static let durableCheckpointLimit = 160
+    static let durableToolCallLimit = 100
 
     func appendTrace(runID: UUID, stepIndex: Int, phase: String, message: String, toolName: String? = nil, latencyMs: Double = 0) {
         let snapshot = AgentTraceSnapshot(runID: runID, stepIndex: stepIndex, phase: phase, message: DiagnosticsRedactor.redact(message, maxLength: 600), toolName: toolName, latencyMs: latencyMs, createdAt: .now)
         lock.withLock {
-            if let inMemoryContext {
-                inMemoryContext.insert(AgentTraceRecord(runID: snapshot.runID, stepIndex: snapshot.stepIndex, phase: snapshot.phase, message: snapshot.message, toolName: snapshot.toolName, latencyMs: snapshot.latencyMs, createdAt: snapshot.createdAt))
-            } else {
-                traces.append(snapshot)
-            }
+            traces.append(snapshot)
+            trimOverflow(&traces, limit: Self.stagedTraceLimit)
         }
     }
 
     func appendCheckpoint(runID: UUID, nodeID: String, stateSummary: String, stateData: Data? = nil) {
         let snapshot = AgentCheckpointSnapshot(runID: runID, nodeID: nodeID, stateSummary: DiagnosticsRedactor.redact(stateSummary, maxLength: 360), stateData: stateData, createdAt: .now)
         lock.withLock {
-            if let inMemoryContext {
-                inMemoryContext.insert(AgentCheckpointRecord(runID: snapshot.runID, nodeID: snapshot.nodeID, stateSummary: snapshot.stateSummary, stateData: snapshot.stateData, createdAt: snapshot.createdAt))
-            } else {
-                checkpoints.append(snapshot)
-            }
+            checkpoints.append(snapshot)
+            trimOverflow(&checkpoints, limit: Self.stagedCheckpointLimit)
         }
     }
 
@@ -342,37 +362,12 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             createdAt: .now
         )
         lock.withLock {
-            if let inMemoryContext {
-                inMemoryContext.insert(ToolCallRecord(
-                    runID: snapshot.runID,
-                    sessionID: snapshot.sessionID,
-                    toolName: snapshot.toolName,
-                    input: snapshot.input,
-                    output: snapshot.output,
-                    riskLevel: snapshot.riskLevel,
-                    outcomeRawValue: snapshot.outcomeRawValue,
-                    requiresApproval: snapshot.requiresApproval,
-                    approved: snapshot.approved,
-                    target: snapshot.target,
-                    normalizedArgumentsJSON: snapshot.normalizedArgumentsJSON,
-                    payloadHash: snapshot.payloadHash,
-                    statusCode: snapshot.statusCode,
-                    latencyMs: snapshot.latencyMs,
-                    errorCategory: snapshot.errorCategory,
-                    createdAt: snapshot.createdAt
-                ))
-            } else {
-                toolCalls.append(snapshot)
-            }
+            toolCalls.append(snapshot)
+            trimOverflow(&toolCalls, limit: Self.stagedToolCallLimit)
         }
     }
 
     func flush(runID: UUID, to context: ModelContext) throws {
-        if let inMemoryContext {
-            try flushFromInMemoryContext(runID: runID, from: inMemoryContext, to: context)
-            return
-        }
-
         let payload = lock.withLock {
             let matchingTraces = traces.filter { $0.runID == runID }
             let matchingCheckpoints = checkpoints.filter { $0.runID == runID }
@@ -410,46 +405,49 @@ final class AgentTelemetryBuffer: @unchecked Sendable {
             ))
         }
         try context.safeSave()
+        try pruneDurableTelemetry(in: context)
     }
 
-    private func flushFromInMemoryContext(runID: UUID, from sourceContext: ModelContext, to destinationContext: ModelContext) throws {
-        try lock.withLock {
-            let traceRecords = try sourceContext.fetch(FetchDescriptor<AgentTraceRecord>()).filter { $0.runID == runID }
-            let checkpointRecords = try sourceContext.fetch(FetchDescriptor<AgentCheckpointRecord>()).filter { $0.runID == runID }
-            let toolCallRecords = try sourceContext.fetch(FetchDescriptor<ToolCallRecord>()).filter { $0.runID == runID }
+    private func trimOverflow<T>(_ values: inout [T], limit: Int) {
+        let overflow = values.count - limit
+        if overflow > 0 { values.removeFirst(overflow) }
+    }
 
-            for trace in traceRecords {
-                destinationContext.insert(AgentTraceRecord(runID: trace.runID, stepIndex: trace.stepIndex, phase: trace.phase, message: trace.message, toolName: trace.toolName, latencyMs: trace.latencyMs, createdAt: trace.createdAt))
-                sourceContext.delete(trace)
-            }
-            for checkpoint in checkpointRecords {
-                destinationContext.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.stateSummary, stateData: checkpoint.stateData, createdAt: checkpoint.createdAt))
-                sourceContext.delete(checkpoint)
-            }
-            for toolCall in toolCallRecords {
-                destinationContext.insert(ToolCallRecord(
-                    runID: toolCall.runID,
-                    sessionID: toolCall.sessionID,
-                    toolName: toolCall.toolName,
-                    input: toolCall.input,
-                    output: toolCall.output,
-                    riskLevel: toolCall.riskLevel,
-                    outcomeRawValue: toolCall.outcomeRawValue,
-                    requiresApproval: toolCall.requiresApproval,
-                    approved: toolCall.approved,
-                    target: toolCall.target,
-                    normalizedArgumentsJSON: toolCall.normalizedArgumentsJSON,
-                    payloadHash: toolCall.payloadHash,
-                    statusCode: toolCall.statusCode,
-                    latencyMs: toolCall.latencyMs,
-                    errorCategory: toolCall.errorCategory,
-                    createdAt: toolCall.createdAt
-                ))
-                sourceContext.delete(toolCall)
-            }
-            try sourceContext.safeSave()
-            try destinationContext.safeSave()
-        }
+    private func pruneDurableTelemetry(in context: ModelContext) throws {
+        try pruneTraceRecords(in: context)
+        try pruneCheckpointRecords(in: context)
+        try pruneToolCallRecords(in: context)
+        try context.safeSave()
+    }
+
+    private func pruneTraceRecords(in context: ModelContext) throws {
+        var descriptor = FetchDescriptor<AgentTraceRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        descriptor.fetchOffset = Self.durableTraceLimit
+        guard let cutoff = try context.fetch(descriptor).first?.createdAt else { return }
+        try context.delete(model: AgentTraceRecord.self, where: #Predicate { record in
+            record.createdAt < cutoff
+        })
+    }
+
+    private func pruneCheckpointRecords(in context: ModelContext) throws {
+        var descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        descriptor.fetchOffset = Self.durableCheckpointLimit
+        guard let cutoff = try context.fetch(descriptor).first?.createdAt else { return }
+        try context.delete(model: AgentCheckpointRecord.self, where: #Predicate { record in
+            record.createdAt < cutoff
+        })
+    }
+
+    private func pruneToolCallRecords(in context: ModelContext) throws {
+        var descriptor = FetchDescriptor<ToolCallRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        descriptor.fetchOffset = Self.durableToolCallLimit
+        guard let cutoff = try context.fetch(descriptor).first?.createdAt else { return }
+        try context.delete(model: ToolCallRecord.self, where: #Predicate { record in
+            record.createdAt < cutoff
+        })
     }
 }
 
@@ -502,8 +500,15 @@ struct AgentLoop: Sendable {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
                 do {
-                    let descriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-                    let checkpoint = try context.fetch(descriptor).first { $0.runID == run.id && $0.stateData != nil }
+                    let runID = run.id
+                    var descriptor = FetchDescriptor<AgentCheckpointRecord>(
+                        predicate: #Predicate { checkpoint in
+                            checkpoint.runID == runID && checkpoint.stateData != nil
+                        },
+                        sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+                    )
+                    descriptor.fetchLimit = 1
+                    let checkpoint = try context.fetch(descriptor).first
                     guard let data = checkpoint?.stateData else { throw AgentRuntimeError.resumeCheckpointUnavailable }
                     var state = try JSONDecoder().decode(AgentLoopState.self, from: data)
                     run.statusRawValue = AgentRunStatus.running.rawValue
@@ -550,7 +555,14 @@ struct AgentLoop: Sendable {
 
         if let tool, needsPhase(.executeTool, state: state) {
             let metadata = tool.metadata(for: goal)
-            if metadata.requiresNetwork && !options.networkToolsEnabled {
+            if let result = preflightMissingInputResult(for: tool, goal: goal) {
+                state.toolResults.append(result.output)
+                telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
+                try await runPhase(.executeTool, state: &state, runRecord: runRecord, context: context, continuation: continuation) { result.output }
+                let observation = observer.observe(toolResult: result, retrievedContext: state.retrievedContext)
+                state.observations.append(observation)
+                try await runPhase(.observeResult, state: &state, runRecord: runRecord, context: context, continuation: continuation) { observation }
+            } else if metadata.requiresNetwork && !options.networkToolsEnabled {
                 let result = ToolResult.networkDisabled(toolName: tool.name, riskLevel: tool.riskLevel, target: metadata.targetPreview)
                 state.toolResults.append(result.output)
                 telemetryBuffer.appendToolCall(runID: state.runID, input: goal, result: result)
@@ -677,7 +689,18 @@ struct AgentLoop: Sendable {
     }
 
     private func recordCheckpoint(state: AgentLoopState, nodeID: String, context: ModelContext, includeStateData: Bool) throws {
-        let data = includeStateData ? try? JSONEncoder().encode(state) : nil
+        let data: Data?
+        if includeStateData {
+            let snapshot = state.checkpointSnapshot()
+            let encoded = try? JSONEncoder().encode(snapshot)
+            if let encoded, encoded.count <= AgentLoopState.checkpointByteLimit {
+                data = encoded
+            } else {
+                data = try? JSONEncoder().encode(state.compactCheckpointSnapshot())
+            }
+        } else {
+            data = nil
+        }
         telemetryBuffer.appendCheckpoint(runID: state.runID, nodeID: nodeID, stateSummary: state.summary, stateData: data)
     }
 
@@ -789,6 +812,103 @@ struct AgentLoop: Sendable {
         return "\(action). Target: \(target). Input: \(DiagnosticsRedactor.redact(goal, maxLength: 180))"
     }
 
+    private func preflightMissingInputResult(for tool: any Tool, goal: String) -> ToolResult? {
+        let normalized = goal.lowercased()
+            .replacingOccurrences(of: #"[^\p{L}\p{N}@.:/_+\-\s]"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func missing(_ message: String) -> ToolResult {
+            ToolResult.needsInput(
+                toolName: tool.name,
+                output: message,
+                riskLevel: tool.riskLevel,
+                requiresApproval: false
+            )
+        }
+
+        switch tool.name {
+        case "web_fetch":
+            if let siteSearch = unsupportedSiteSearchRequest(goal) {
+                return missing("Provide the exact http or https URL to fetch. Searching \(siteSearch.host) for \"\(siteSearch.query)\" is not supported by web_fetch.")
+            }
+            return containsHTTPURL(goal) ? nil : missing("Provide an http or https URL to fetch. Open-ended web search is not available without a specific URL.")
+        case "integrated_webview":
+            return containsHTTPURL(goal) ? nil : missing("Provide an http or https URL for the integrated web view.")
+        case "remote_network":
+            return containsHTTPURL(goal) ? nil : missing("Provide an HTTP or HTTPS URL for the remote network request.")
+        case "email_compose":
+            return containsEmail(goal) ? nil : missing("Provide an email address to prepare mail.")
+        case "text_message":
+            return containsPhoneNumber(goal) ? nil : missing("Provide a phone number to prepare an SMS.")
+        case "phone_call":
+            return containsPhoneNumber(goal) ? nil : missing("Provide a phone number to prepare a call.")
+        case "local_file":
+            let hasAction = normalized.contains("list files")
+                || normalized.contains("read file")
+                || normalized.contains("write file")
+                || normalized.contains("delete file")
+            guard hasAction else {
+                return missing("Supported local file actions: list, read, write, delete.")
+            }
+            if normalized.contains("list files") {
+                return nil
+            }
+            return containsFileArgument(goal) ? nil : missing("Provide a filename for local file action.")
+        case "contacts_lookup":
+            let query = normalized
+                .replacingOccurrences(of: "find contact", with: "")
+                .replacingOccurrences(of: "contacts", with: "")
+                .replacingOccurrences(of: "contact", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return query.isEmpty ? missing("Provide a contact name to search.") : nil
+        case "maps_lookup":
+            let query = normalized
+                .replacingOccurrences(of: "open map", with: "")
+                .replacingOccurrences(of: "directions to", with: "")
+                .replacingOccurrences(of: "directions", with: "")
+                .replacingOccurrences(of: "navigate to", with: "")
+                .replacingOccurrences(of: "navigate", with: "")
+                .replacingOccurrences(of: "nearby", with: "")
+                .replacingOccurrences(of: "maps", with: "")
+                .replacingOccurrences(of: "map", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return query.isEmpty ? missing("Provide a place, address, or directions destination for Maps.") : nil
+        default:
+            return nil
+        }
+    }
+
+    private func containsHTTPURL(_ input: String) -> Bool {
+        input.range(of: #"https?://[^\s]+"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private func unsupportedSiteSearchRequest(_ input: String) -> (host: String, query: String)? {
+        let pattern = #"\b(?:search|find)\s+(https?://[^\s]+)\s+for\s+(.+)$"#
+        guard let match = input.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
+        let raw = String(input[match])
+        let parts = raw.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count == 3, let url = URL(string: String(parts[1])) else { return nil }
+        let query = String(parts[2])
+            .replacingOccurrences(of: #"(?i)^for\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        guard !query.isEmpty else { return nil }
+        return (url.host ?? url.absoluteString, query)
+    }
+
+    private func containsEmail(_ input: String) -> Bool {
+        input.range(of: #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private func containsPhoneNumber(_ input: String) -> Bool {
+        input.range(of: #"\+?[0-9][0-9\s\-\(\)\.]{5,}[0-9]"#, options: .regularExpression) != nil
+    }
+
+    private func containsFileArgument(_ input: String) -> Bool {
+        input.range(of: #""[^"]+""#, options: .regularExpression) != nil
+            || input.range(of: #"(read|write|delete)\s+file\s+[^\s]+"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     private func responseText(goal: String, state: AgentLoopState, provider: any LLMProvider, contextPackage: ContextPackage, timeoutSeconds: TimeInterval) async throws -> String {
         if let toolOutput = state.toolResults.last { return UserFacingResponseSanitizer.sanitize(toolOutput) }
         let request = LLMRequest(
@@ -799,7 +919,7 @@ struct AgentLoop: Sendable {
             isPromptPreassembled: true
         )
         let response = try await withTimeout(seconds: timeoutSeconds) {
-            try await provider.complete(request: request)
+            try await provider.completeDetached(request: request)
         }
         return try UserFacingResponseSanitizer.sanitizeModelResponse(response.text)
     }
@@ -813,7 +933,7 @@ struct AgentLoop: Sendable {
         let race = AsyncTimeoutRace<Value>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let operationTask = Task {
+                let operationTask = Task.detached {
                     do {
                         let value = try await operation()
                         race.finish(.success(value))
@@ -821,7 +941,7 @@ struct AgentLoop: Sendable {
                         race.finish(.failure(error))
                     }
                 }
-                let timeoutTask = Task {
+                let timeoutTask = Task.detached {
                     do {
                         try await Task.sleep(nanoseconds: timeoutNanoseconds(for: seconds))
                         race.finish(.failure(AgentRuntimeError.timedOut))

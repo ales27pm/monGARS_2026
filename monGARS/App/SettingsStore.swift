@@ -3,7 +3,12 @@ import Foundation
 @Observable
 final class SettingsStore {
     var providerMode: ProviderMode {
-        didSet { UserDefaults.standard.set(providerMode.rawValue, forKey: Keys.providerMode) }
+        didSet {
+            UserDefaults.standard.set(providerMode.rawValue, forKey: Keys.providerMode)
+            if providerMode != .foundation, foundationModelsEnabled {
+                foundationModelsEnabled = false
+            }
+        }
     }
 
     var remoteEndpoint: String {
@@ -20,6 +25,10 @@ final class SettingsStore {
 
     var remoteProviderEnabled: Bool {
         didSet { UserDefaults.standard.set(remoteProviderEnabled, forKey: Keys.remoteProviderEnabled) }
+    }
+
+    var foundationModelsEnabled: Bool {
+        didSet { UserDefaults.standard.set(foundationModelsEnabled, forKey: Keys.foundationModelsEnabled) }
     }
 
     var mlxModelID: String {
@@ -78,12 +87,14 @@ final class SettingsStore {
     }
 
     init() {
-        let rawMode = UserDefaults.standard.string(forKey: Keys.providerMode) ?? ProviderMode.foundation.rawValue
-        providerMode = ProviderMode(rawValue: rawMode) ?? .foundation
+        let rawMode = UserDefaults.standard.string(forKey: Keys.providerMode) ?? ProviderMode.mlx.rawValue
+        let initialProviderMode = ProviderMode(rawValue: rawMode) ?? .mlx
+        providerMode = initialProviderMode
         remoteEndpoint = UserDefaults.standard.string(forKey: Keys.remoteEndpoint) ?? "http://localhost:11434/api/generate"
         remoteModel = AppNetworkConfiguration.remoteModel
         remoteAPIKey = AppNetworkConfiguration.remoteAPIKey
         remoteProviderEnabled = UserDefaults.standard.bool(forKey: Keys.remoteProviderEnabled)
+        foundationModelsEnabled = initialProviderMode == .foundation && UserDefaults.standard.bool(forKey: Keys.foundationModelsEnabled)
         mlxModelID = UserDefaults.standard.string(forKey: Keys.mlxModelID) ?? MLXModelPreset.default.id
         mlxMaxTokens = UserDefaults.standard.object(forKey: Keys.mlxMaxTokens) as? Int ?? 512
         if UserDefaults.standard.object(forKey: Keys.mlxTemperature) != nil {
@@ -108,6 +119,7 @@ final class SettingsStore {
         remoteEndpoint = "http://localhost:11434/api/generate"
         remoteModel = "llama3.2"
         remoteAPIKey = ""
+        foundationModelsEnabled = false
         networkTimeoutSeconds = 20
         networkMaxRetries = 2
         weatherEndpoint = "https://api.openweathermap.org/data/2.5/weather"
@@ -146,6 +158,7 @@ final class SettingsStore {
         static let providerMode = "providerMode"
         static let remoteEndpoint = "remoteEndpoint"
         static let remoteProviderEnabled = "remoteProviderEnabled"
+        static let foundationModelsEnabled = "foundationModelsEnabled"
         static let mlxModelID = "mlxModelID"
         static let mlxMaxTokens = "mlxMaxTokens"
         static let mlxTemperature = "mlxTemperature"

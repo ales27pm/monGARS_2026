@@ -34,6 +34,28 @@ enum AgentEvent: Sendable {
     case partialResponse(String)
 }
 
+private extension AgentState {
+    func checkpointSnapshot() -> AgentState {
+        var snapshot = self
+        snapshot.userInput = Self.truncated(userInput, limit: 1_200)
+        snapshot.messages = Self.boundedStrings(messages, itemLimit: 6, characterLimit: 1_200)
+        snapshot.toolOutput = toolOutput.map { Self.truncated($0, limit: 1_200) }
+        snapshot.retrievedContext = Self.boundedStrings(retrievedContext, itemLimit: 6, characterLimit: 1_200)
+        snapshot.finalResponse = Self.truncated(finalResponse, limit: 1_200)
+        return snapshot
+    }
+
+    private static func boundedStrings(_ values: [String], itemLimit: Int, characterLimit: Int) -> [String] {
+        values.suffix(itemLimit).map { truncated($0, limit: characterLimit) }
+    }
+
+    private static func truncated(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        let index = value.index(value.startIndex, offsetBy: limit)
+        return String(value[..<index]) + "\n[truncated]"
+    }
+}
+
 struct AgentNode: Sendable {
     let id: String
     let run: @Sendable (AgentState, AgentExecutionContext) async throws -> AgentState
@@ -74,8 +96,9 @@ struct AgentGraph: Sendable {
                         state = try await node.run(state, context)
                         state.completedNodeIDs.append(node.id)
 
-                        let checkpoint = AgentCheckpoint(runID: state.runID, nodeID: node.id, summary: state.summary, state: state)
-                        let stateData = try? JSONEncoder().encode(state)
+                        let checkpointState = state.checkpointSnapshot()
+                        let checkpoint = AgentCheckpoint(runID: checkpointState.runID, nodeID: node.id, summary: checkpointState.summary, state: checkpointState)
+                        let stateData = try? JSONEncoder().encode(checkpointState)
                         context.context.insert(AgentCheckpointRecord(runID: checkpoint.runID, nodeID: checkpoint.nodeID, stateSummary: checkpoint.summary, stateData: stateData))
                         try? context.context.save()
                         await context.event(.checkpoint(checkpoint))
@@ -172,7 +195,7 @@ struct AgentGraph: Sendable {
                 }
                 let responseText: String
                 if accumulated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let response = try await execution.llmProvider.complete(request: request)
+                    let response = try await execution.llmProvider.completeDetached(request: request)
                     responseText = response.text
                 } else {
                     responseText = accumulated
@@ -244,7 +267,7 @@ struct AgentGraph: Sendable {
                 next.finalResponse = UserFacingResponseSanitizer.sanitize(toolOutput)
             } else {
                 let request = Self.responseRequest(for: state)
-                let response = try await execution.llmProvider.complete(request: request)
+                let response = try await execution.llmProvider.completeDetached(request: request)
                 next.finalResponse = try UserFacingResponseSanitizer.sanitizeModelResponse(response.text)
             }
             return next

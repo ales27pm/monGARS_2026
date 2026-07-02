@@ -149,6 +149,17 @@ private func networkTargetPreview(from input: String) -> String? {
     return url.host ?? url.absoluteString
 }
 
+private func unsupportedSiteSearchQuery(in input: String) -> String? {
+    let pattern = #"\b(?:search|find)\s+https?://[^\s]+\s+for\s+(.+)$"#
+    guard let match = input.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
+    let raw = String(input[match])
+    guard let queryRange = raw.range(of: #"\bfor\s+(.+)$"#, options: [.regularExpression, .caseInsensitive]) else { return nil }
+    let query = String(raw[queryRange])
+        .replacingOccurrences(of: #"(?i)^for\s+"#, with: "", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+    return query.isEmpty ? nil : query
+}
+
 private func normalizedIntent(_ input: String) -> String {
     input.lowercased()
         .replacingOccurrences(of: #"[^\p{L}\p{N}\s]"#, with: " ", options: .regularExpression)
@@ -1173,7 +1184,24 @@ struct WebFetchTool: Tool {
 
     func canHandle(_ input: String) -> Bool {
         let lower = input.lowercased()
-        return lower.contains("web fetch") || lower.hasPrefix("fetch ") || lower.contains("download url")
+        let normalized = normalizedIntent(input)
+        if firstHTTPURL(in: input) != nil {
+            return lower.hasPrefix("http://")
+                || lower.hasPrefix("https://")
+                || normalized.hasPrefix("fetch ")
+                || normalized.hasPrefix("read ")
+                || normalized.hasPrefix("search ")
+                || normalized.hasPrefix("find ")
+                || normalized.contains(" web ")
+                || normalized.contains(" page ")
+        }
+        return lower.contains("web fetch")
+            || lower.hasPrefix("fetch ")
+            || lower.contains("download url")
+            || lower.contains("read url")
+            || lower.contains("search web")
+            || lower.contains("web search")
+            || lower.contains("search the web")
     }
 
     func metadata(for input: String) -> ToolExecutionMetadata {
@@ -1185,12 +1213,24 @@ struct WebFetchTool: Tool {
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
+        guard let url = firstHTTPURL(in: request.input) else {
+            return .needsInput(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: false)
+        }
+        if let query = unsupportedSiteSearchQuery(in: request.input) {
+            return ToolResult(
+                toolName: name,
+                output: "Provide the exact http or https URL to fetch. Searching \(url.host ?? url.absoluteString) for \"\(query)\" is not supported by web_fetch.",
+                outcome: .needsInput,
+                riskLevel: riskLevel,
+                requiresApproval: false,
+                approved: true,
+                target: url.host,
+                errorCategory: "invalid_arguments"
+            )
+        }
         try requirePrivacyApproval(request, toolName: name)
         guard request.networkAccessAllowed else {
             return networkDisabledResult(toolName: name, riskLevel: riskLevel)
-        }
-        guard let url = firstHTTPURL(in: request.input) else {
-            return .needsInput(toolName: name, output: "Provide an http or https URL to fetch.", riskLevel: riskLevel, requiresApproval: true)
         }
         let summary = try await fetchText(url: url, limit: 2_000)
         return ToolResult(
@@ -1566,9 +1606,7 @@ struct DocumentSummaryTool: Tool {
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
-        let summaries = try documentService.documents(context: context).prefix(3).map { document in
-            "\(document.title): \(document.content.prefix(180))"
-        }
+        let summaries = try documentService.recentDocumentSummaries(context: context)
         let output = summaries.isEmpty ? "No documents have been imported yet." : summaries.joined(separator: "\n\n")
         return ToolResult(toolName: name, output: output, outcome: summaries.isEmpty ? .noResults : .success)
     }
@@ -1584,7 +1622,9 @@ struct ConversationSearchTool: Tool {
     }
 
     func execute(request: ToolExecutionRequest, context: ModelContext) async throws -> ToolResult {
-        let conversations = try context.fetch(FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
+        var descriptor = FetchDescriptor<Conversation>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        descriptor.fetchLimit = 50
+        let conversations = try context.fetch(descriptor)
         let terms = request.input.searchTerms
         let matches = conversations.flatMap { conversation in
             conversation.messages.filter { message in

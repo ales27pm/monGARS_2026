@@ -236,7 +236,7 @@ private enum ToolRouteScorer {
         case "integrated_webview":
             ToolRouteProfile(positiveKeywords: ["webview", "web view", "open website", "open url"], requiresURL: true)
         case "web_fetch":
-            ToolRouteProfile(positiveKeywords: ["web fetch", "fetch", "download url", "read url", "extract page"], requiresURL: true)
+            ToolRouteProfile(positiveKeywords: ["web fetch", "fetch", "download url", "read url", "extract page", "search web", "web search", "search the web"], requiresURL: true)
         case "remote_network":
             ToolRouteProfile(positiveKeywords: ["remote network", "remote http", "network request", "get", "post", "put", "patch", "delete"], requiresURL: true)
         case "local_file":

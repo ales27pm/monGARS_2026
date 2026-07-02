@@ -9,7 +9,11 @@ struct LiveToolCallDiagnostic: Identifiable, Equatable {
 
 @Observable
 final class DiagnosticsStore {
-    var providerStatus = "Foundation Models provider pending runtime availability"
+    static let graphStepLimit = 200
+    static let liveToolCallLimit = 100
+    static let checkpointLimit = 100
+
+    var providerStatus = "Provider status pending"
     var graphSteps: [String] = []
     var toolCalls: [LiveToolCallDiagnostic] = []
     var checkpoints: [String] = []
@@ -18,17 +22,25 @@ final class DiagnosticsStore {
     func record(event: AgentEvent) {
         switch event {
         case .step(let name):
-            graphSteps.append(DiagnosticsRedactor.redact(name, maxLength: 240))
+            appendBounded(DiagnosticsRedactor.redact(name, maxLength: 240), to: &graphSteps, limit: Self.graphStepLimit)
         case .toolCall(let tool, let input, let output):
-            toolCalls.append(LiveToolCallDiagnostic(
+            appendBounded(LiveToolCallDiagnostic(
                 toolName: DiagnosticsRedactor.redact(tool, maxLength: 120),
                 input: DiagnosticsRedactor.redact(input, maxLength: 240),
                 output: DiagnosticsRedactor.redact(output, maxLength: 320)
-            ))
+            ), to: &toolCalls, limit: Self.liveToolCallLimit)
         case .checkpoint(let checkpoint):
-            checkpoints.append("\(checkpoint.nodeID): \(DiagnosticsRedactor.redact(checkpoint.summary, maxLength: 240))")
+            appendBounded("\(checkpoint.nodeID): \(DiagnosticsRedactor.redact(checkpoint.summary, maxLength: 240))", to: &checkpoints, limit: Self.checkpointLimit)
         case .partialResponse:
             break
+        }
+    }
+
+    private func appendBounded<T>(_ value: T, to values: inout [T], limit: Int) {
+        values.append(value)
+        let overflow = values.count - limit
+        if overflow > 0 {
+            values.removeFirst(overflow)
         }
     }
 }

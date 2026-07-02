@@ -3,11 +3,31 @@ import SwiftUI
 
 struct DiagnosticsView: View {
     @Bindable var container: AppContainer
-    @Query(sort: \AgentCheckpointRecord.createdAt, order: .reverse) private var checkpointRecords: [AgentCheckpointRecord]
-    @Query(sort: \AgentRunRecord.updatedAt, order: .reverse) private var runs: [AgentRunRecord]
-    @Query(sort: \AgentTraceRecord.createdAt, order: .reverse) private var traces: [AgentTraceRecord]
-    @Query(sort: \ToolCallRecord.createdAt, order: .reverse) private var persistedToolCalls: [ToolCallRecord]
+    @Query private var checkpointRecords: [AgentCheckpointRecord]
+    @Query private var runs: [AgentRunRecord]
+    @Query private var traces: [AgentTraceRecord]
+    @Query private var persistedToolCalls: [ToolCallRecord]
     @State private var visualizationMode: DiagnosticsVisualizationMode = .timeline
+
+    init(container: AppContainer) {
+        self.container = container
+
+        var checkpointDescriptor = FetchDescriptor<AgentCheckpointRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        checkpointDescriptor.fetchLimit = 50
+        _checkpointRecords = Query(checkpointDescriptor)
+
+        var runDescriptor = FetchDescriptor<AgentRunRecord>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        runDescriptor.fetchLimit = 50
+        _runs = Query(runDescriptor)
+
+        var traceDescriptor = FetchDescriptor<AgentTraceRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        traceDescriptor.fetchLimit = 120
+        _traces = Query(traceDescriptor)
+
+        var toolCallDescriptor = FetchDescriptor<ToolCallRecord>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        toolCallDescriptor.fetchLimit = 80
+        _persistedToolCalls = Query(toolCallDescriptor)
+    }
 
     var body: some View {
         List {

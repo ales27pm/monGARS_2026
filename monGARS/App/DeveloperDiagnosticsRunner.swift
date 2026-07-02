@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+#if canImport(Darwin)
+import Darwin
+#endif
 
 #if canImport(UIKit)
 import UIKit
@@ -72,15 +75,17 @@ enum DeveloperDiagnosticsRunner {
         appendFrameworkSection(documentService: container.documentService, to: &builder)
         appendPermissionSection(to: &builder)
         appendSwiftDataCounts(context: context, to: &builder)
+        appendMemoryFootprintSection(to: &builder)
+        await appendAgentRuntimeE2E(container: container, context: context, to: &builder)
         await appendRealToolE2E(container: container, context: context, to: &builder)
         appendRecentDiagnostics(context: context, to: &builder)
         builder.add("Notes")
         builder.add("- These are in-app runtime self-checks and direct real-tool E2E probes, not XCTest execution.")
-        builder.add("- No LLM provider is used by this report; tools are invoked directly through their production implementations.")
+        builder.add("- No production LLM provider is used by this report; the agent-runtime probe uses an inert counting provider and expects zero invocations.")
         builder.add("- Network calls and privacy-sensitive Apple integrations still require Settings enablement and user approval.")
         builder.add("- Secrets, contacts, message bodies, and token-like values are redacted before export.")
 
-        let text = DiagnosticsRedactor.redact(builder.text, maxLength: 24_000)
+        let text = DiagnosticsRedactor.redact(builder.text, maxLength: 32_000)
         let url = writeReportFile ? writeReport(text) : nil
         return DeveloperDiagnosticsResult(text: text, fileURL: url)
     }
@@ -97,6 +102,107 @@ enum DeveloperDiagnosticsRunner {
         builder.add("- Physical device runtime: \(isPhysicalIOSDeviceRuntime())")
         builder.add("- Accepted on-device iteration: \(isPhysicalIOSDeviceRuntime())")
         builder.add("- Report acceptance: \(isPhysicalIOSDeviceRuntime() ? "accepted" : "rejected - physical iOS device runtime required")")
+        builder.add("")
+    }
+
+    @MainActor
+    private static func appendAgentRuntimeE2E(container: AppContainer, context: ModelContext, to builder: inout ReportBuilder) async {
+        builder.add("Agent Runtime E2E")
+        builder.add("- Production LLM provider usage: false")
+        builder.add("- Probe: Search web must route to web_fetch preflight and complete without provider, approval, or network execution.")
+
+        let provider = DiagnosticsCountingLLMProvider()
+        var completedRunID: UUID?
+        var completedResponse = ""
+
+        do {
+            for try await event in container.agentRuntime.run(
+                goal: "Search web",
+                conversationID: nil,
+                messages: [],
+                provider: provider,
+                options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: min(max(container.settingsStore.networkTimeoutSeconds, 5), 20), networkToolsEnabled: true),
+                context: context
+            ) {
+                if case .completed(let runID, let response) = event {
+                    completedRunID = runID
+                    completedResponse = response
+                }
+            }
+
+            let providerWasBypassed = provider.completeCallCount == 0
+            let responseIsPreflight = completedResponse.contains("Provide an http or https URL")
+            let runID = completedRunID
+            let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>()).filter { call in
+                runID.map { call.runID == $0 } ?? false
+            }
+            let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { approval in
+                runID.map { approval.runID == $0 } ?? false
+            }
+            let runs = try context.fetch(FetchDescriptor<AgentRunRecord>()).filter { run in
+                runID.map { run.id == $0 } ?? false
+            }
+            let toolCall = toolCalls.first
+            let run = runs.first
+            let passed = providerWasBypassed
+                && runID != nil
+                && responseIsPreflight
+                && approvals.isEmpty
+                && toolCall?.toolName == "web_fetch"
+                && toolCall?.errorCategory == "invalid_arguments"
+                && run?.statusRawValue == AgentRunStatus.completed.rawValue
+
+            builder.add("- \(passed ? "PASS" : "FAIL") Search web runtime preflight | tool=web_fetch | providerCalls=\(provider.completeCallCount) | approvals=\(approvals.count) | error=\(toolCall?.errorCategory ?? "none") | runStatus=\(run?.statusRawValue ?? "missing") | output=\(DiagnosticsRedactor.redact(completedResponse, maxLength: 220))")
+        } catch {
+            builder.add("- FAIL Search web runtime preflight | tool=web_fetch | providerCalls=\(provider.completeCallCount) | approvals=unknown | error=thrown_error | output=\(DiagnosticsRedactor.redact(error.localizedDescription, maxLength: 220))")
+        }
+
+        builder.add("- Probe: URL site search must fail fast through web_fetch preflight and complete without provider, approval, or network execution.")
+        let siteSearchProvider = DiagnosticsCountingLLMProvider()
+        var siteSearchRunID: UUID?
+        var siteSearchResponse = ""
+
+        do {
+            for try await event in container.agentRuntime.run(
+                goal: "Search https://lapresse.ca for \"luc Bordeleau\"",
+                conversationID: nil,
+                messages: [],
+                provider: siteSearchProvider,
+                options: AgentRuntimeOptions(autonomyLevel: .auto, maxSteps: 12, timeoutSeconds: min(max(container.settingsStore.networkTimeoutSeconds, 5), 20), networkToolsEnabled: true),
+                context: context
+            ) {
+                if case .completed(let runID, let response) = event {
+                    siteSearchRunID = runID
+                    siteSearchResponse = response
+                }
+            }
+
+            let providerWasBypassed = siteSearchProvider.completeCallCount == 0
+            let responseIsPreflight = siteSearchResponse.contains("not supported by web_fetch")
+            let runID = siteSearchRunID
+            let toolCalls = try context.fetch(FetchDescriptor<ToolCallRecord>()).filter { call in
+                runID.map { call.runID == $0 } ?? false
+            }
+            let approvals = try context.fetch(FetchDescriptor<ApprovalRequestRecord>()).filter { approval in
+                runID.map { approval.runID == $0 } ?? false
+            }
+            let runs = try context.fetch(FetchDescriptor<AgentRunRecord>()).filter { run in
+                runID.map { run.id == $0 } ?? false
+            }
+            let toolCall = toolCalls.first
+            let run = runs.first
+            let passed = providerWasBypassed
+                && runID != nil
+                && responseIsPreflight
+                && approvals.isEmpty
+                && toolCall?.toolName == "web_fetch"
+                && toolCall?.errorCategory == "invalid_arguments"
+                && run?.statusRawValue == AgentRunStatus.completed.rawValue
+
+            builder.add("- \(passed ? "PASS" : "FAIL") URL site search runtime preflight | tool=web_fetch | providerCalls=\(siteSearchProvider.completeCallCount) | approvals=\(approvals.count) | error=\(toolCall?.errorCategory ?? "none") | runStatus=\(run?.statusRawValue ?? "missing") | output=\(DiagnosticsRedactor.redact(siteSearchResponse, maxLength: 220))")
+        } catch {
+            builder.add("- FAIL URL site search runtime preflight | tool=web_fetch | providerCalls=\(siteSearchProvider.completeCallCount) | approvals=unknown | error=thrown_error | output=\(DiagnosticsRedactor.redact(error.localizedDescription, maxLength: 220))")
+        }
         builder.add("")
     }
 
@@ -217,7 +323,7 @@ enum DeveloperDiagnosticsRunner {
                 try pdfData.write(to: pdfURL, options: .atomic)
                 defer { try? FileManager.default.removeItem(at: pdfURL) }
                 try container.documentService.importDocument(url: pdfURL, context: context)
-                if let importedPDF = try container.documentService.documents(context: context).first(where: { $0.title == pdfURL.lastPathComponent }) {
+                if let importedPDF = try container.documentService.document(titled: pdfURL.lastPathComponent, context: context) {
                     let pdfSearchQuery = "\(pdfURL.lastPathComponent) \(pdfProbeText)"
                     let rankedPDF = try container.documentService.rankedSnippets(matching: pdfSearchQuery, context: context, limit: 1)
                     let pdfSearch = try await DocumentSearchTool(documentService: container.documentService).execute(request: approved(pdfSearchQuery), context: context)
@@ -701,6 +807,27 @@ enum DeveloperDiagnosticsRunner {
         } catch { recordError("WebKit unsafe scheme block", "integrated_webview", error) }
 
         do {
+            let result = try await WebFetchTool().execute(request: request("Search web", false, false), context: context)
+            record("web fetch missing URL before approval/network", result) {
+                $0.outcome == .needsInput
+                    && $0.errorCategory == "invalid_arguments"
+                    && $0.requiresApproval == false
+                    && $0.output.contains("http or https URL")
+            }
+        } catch { recordError("web fetch missing URL before approval/network", "web_fetch", error) }
+
+        do {
+            let result = try await WebFetchTool().execute(request: request("Search https://lapresse.ca for \"luc Bordeleau\"", false, false), context: context)
+            record("web fetch site search before approval/network", result) {
+                $0.outcome == .needsInput
+                    && $0.errorCategory == "invalid_arguments"
+                    && $0.requiresApproval == false
+                    && $0.target == "lapresse.ca"
+                    && $0.output.contains("not supported by web_fetch")
+            }
+        } catch { recordError("web fetch site search before approval/network", "web_fetch", error) }
+
+        do {
             let result = try await RemoteNetworkTool().execute(request: request("GET ftp://example.com/file", true, true), context: context)
             record("remote HTTP invalid URL", result) { $0.output.contains("HTTP or HTTPS URL") }
         } catch { recordError("remote HTTP invalid URL", "remote_network", error) }
@@ -854,6 +981,7 @@ enum DeveloperDiagnosticsRunner {
 
         builder.add("Configuration")
         builder.add("- Provider mode: \(settings.providerMode.label)")
+        builder.add("- Foundation Models explicit opt-in: \(settings.foundationModelsEnabled)")
         builder.add("- Network enabled: \(settings.remoteProviderEnabled)")
         builder.add("- MLX model id configured: \(!settings.mlxModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)")
         builder.add("- MLX model loading network: \(settings.remoteProviderEnabled ? "allowed" : "blocked")")
@@ -960,6 +1088,39 @@ enum DeveloperDiagnosticsRunner {
         builder.add("")
     }
 
+    private static func appendMemoryFootprintSection(to builder: inout ReportBuilder) {
+        builder.add("Memory Footprint")
+        if let residentMB = residentMemoryMB() {
+            builder.add("- Resident memory: \(residentMB) MB")
+        } else {
+            builder.add("- Resident memory: unavailable")
+        }
+        builder.add("- MLX cache residency policy: \(MLXLocalProvider.cacheResidencyPolicy)")
+        builder.add("- MLX cache release after prepare: enabled")
+        builder.add("- MLX cache release after completion/error: enabled")
+        builder.add("- MLX cache release after stream termination: enabled")
+        builder.add("- MLX cache release on iOS memory warning: enabled")
+        builder.add("- MLX cache release on cancellation: enabled")
+        builder.add("- MLX allocator cache clear after model release: enabled")
+        builder.add("")
+    }
+
+    private static func residentMemoryMB() -> Int? {
+        #if canImport(Darwin)
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.stride / MemoryLayout<natural_t>.stride)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), rebound, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return Int(info.resident_size / 1_048_576)
+        #else
+        return nil
+        #endif
+    }
+
     @MainActor
     private static func appendRecentDiagnostics(context: ModelContext, to builder: inout ReportBuilder) {
         builder.add("Recent Diagnostics")
@@ -1064,5 +1225,27 @@ private struct ReportBuilder {
 
     mutating func add(_ line: String) {
         lines.append(line)
+    }
+}
+
+private final class DiagnosticsCountingLLMProvider: LLMProvider, @unchecked Sendable {
+    let name = "Diagnostics Counting Provider"
+    let capabilities = LLMProviderCapabilities.foundationLocal
+    private let lock = NSLock()
+    private var calls = 0
+
+    var status: String {
+        get async { "Diagnostics counting provider ready" }
+    }
+
+    var completeCallCount: Int {
+        lock.withLock { calls }
+    }
+
+    func complete(request: LLMRequest) async throws -> LLMResponse {
+        lock.withLock {
+            calls += 1
+        }
+        return LLMResponse(text: "Diagnostics provider should not be invoked for runtime preflight.", providerName: name)
     }
 }
